@@ -31,7 +31,7 @@ def run():
 
     if cfg.coldstart.use_coldstart:
         logger.info("Loading guidance from knowledge base")
-        cfg.coldstart.description = build_guidance_description(cfg)
+        cfg.coldstart.description = build_guidance_description(cfg, task_desc=task_desc)
         logger.info(f"Guidance description: {cfg.coldstart.description}")
 
     with Status("Preparing agent workspace (copying and extracting files) ..."):

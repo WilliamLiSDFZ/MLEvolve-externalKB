@@ -1,9 +1,11 @@
 """Build guidance description for agent from task/model JSON."""
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Any
 
 INIT_SOLUTION_JSON = Path(__file__).resolve().parent / "init_solution_paths.json"
+METHODOLOGY_MAP_JSON = Path(__file__).resolve().parent / "methodology_map.json"
 
 
 def _load_json(path: str) -> Dict:
@@ -57,7 +59,61 @@ def get_init_solution_paths(exp_id: str) -> List[str]:
         return []
 
 
-def build_guidance_description(cfg: Any) -> str:
+def _extract_positive_sections(text: str) -> List[str]:
+    """Extract ## [POSITIVE] sections from a *_methodology.md file."""
+    sections = []
+    pattern = re.compile(r'^## \[POSITIVE\] (.+?)$\n(.*?)(?=^## \[|^# [^#]|\Z)', re.MULTILINE | re.DOTALL)
+    for match in pattern.finditer(text):
+        title = match.group(1).strip()
+        body = match.group(2).strip()
+        sections.append(f"**[POSITIVE] {title}**\n{body}")
+    return sections
+
+
+def _build_methodology_text(task_name: str, methodology_kb_path: str) -> str:
+    """Static path: extract only [POSITIVE] entries for task_name via methodology_map.json.
+
+    No-ops (returns "") when methodology_map.json is absent, so static mode is opt-in.
+    """
+    if not METHODOLOGY_MAP_JSON.exists():
+        return ""
+    try:
+        mapping = _load_json(str(METHODOLOGY_MAP_JSON))
+    except Exception:
+        return ""
+
+    folders = mapping.get(task_name, [])
+    if not folders:
+        return ""
+
+    kb_base = Path(methodology_kb_path)
+    all_entries = []
+    for folder in folders:
+        parts = folder.split("/", 1)
+        if len(parts) != 2:
+            continue
+        venue_year, category = parts
+        cat_dir = kb_base / venue_year / category
+        if not cat_dir.exists():
+            continue
+        for md_file in sorted(cat_dir.glob("*_methodology.md")):
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            all_entries.extend(_extract_positive_sections(text))
+
+    if not all_entries:
+        return ""
+
+    return (
+        "\n\n---\n## Methodology Insights from Literature\n"
+        "The following actionable techniques from recent papers are relevant to this task:\n\n"
+        + "\n\n---\n\n".join(all_entries)
+    )
+
+
+def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
 
     tasks = _load_json(cfg.coldstart.task_json_path)
     models = _load_json(cfg.coldstart.model_json_path)
@@ -65,4 +121,17 @@ def build_guidance_description(cfg: Any) -> str:
     torch_hub_dir = getattr(cfg, "torch_hub_dir", "") or ""
     if torch_hub_dir:
         text = text.replace("{TORCH_HUB_DIR}", torch_hub_dir.rstrip("/"))
+
+    # Methodology / literature KB retrieval (opt-in: only when methodology_kb_path is set).
+    methodology_kb_path = getattr(cfg, "methodology_kb_path", "") or ""
+    if methodology_kb_path:
+        use_dynamic = getattr(cfg, "methodology_dynamic", False)
+        if use_dynamic and task_desc:
+            from engine.coldstart.methodology_agent import build_methodology_guidance
+            methodology_text = build_methodology_guidance(task_desc, methodology_kb_path, cfg.agent.code)
+        else:
+            methodology_text = _build_methodology_text(cfg.exp_id, methodology_kb_path)
+        if methodology_text:
+            text += methodology_text
+
     return text

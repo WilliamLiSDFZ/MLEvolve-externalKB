@@ -150,6 +150,9 @@ class Config(Hashable):
 
     coldstart: ColdstartConfig
 
+    methodology_kb_path: str = ""
+    methodology_dynamic: bool = False
+
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)
 
