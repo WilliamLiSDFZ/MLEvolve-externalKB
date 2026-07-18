@@ -151,7 +151,13 @@ class Config(Hashable):
     coldstart: ColdstartConfig
 
     methodology_kb_path: str = ""
-    methodology_dynamic: bool = False
+    methodology_retrieval: str = "vector"
+    retr_alpha: float = 0.5
+    retr_pool: int = 30
+    retr_top_n: int = 10
+    retr_min_score: float = 0.15
+    retr_token_budget: int = 6000
+    retr_embedding_device: str = "cpu"
 
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)

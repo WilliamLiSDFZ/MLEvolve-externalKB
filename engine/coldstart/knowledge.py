@@ -123,14 +123,15 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
         text = text.replace("{TORCH_HUB_DIR}", torch_hub_dir.rstrip("/"))
 
     # Methodology / literature KB retrieval (opt-in: only when methodology_kb_path is set).
+    # Mode: "vector" (semantic retrieval) | "llm" (category match) | "static" (methodology_map.json)
     methodology_kb_path = getattr(cfg, "methodology_kb_path", "") or ""
     if methodology_kb_path:
-        use_dynamic = getattr(cfg, "methodology_dynamic", False)
-        if use_dynamic and task_desc:
-            from engine.coldstart.methodology_agent import build_methodology_guidance
-            methodology_text = build_methodology_guidance(task_desc, methodology_kb_path, cfg.agent.code)
-        else:
+        mode = str(getattr(cfg, "methodology_retrieval", "vector")).lower()
+        if mode == "static" or not task_desc:
             methodology_text = _build_methodology_text(cfg.exp_id, methodology_kb_path)
+        else:
+            from engine.coldstart.methodology_agent import build_methodology_guidance
+            methodology_text = build_methodology_guidance(task_desc, methodology_kb_path, cfg)
         if methodology_text:
             text += methodology_text
 

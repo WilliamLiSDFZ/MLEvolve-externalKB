@@ -22,8 +22,14 @@ cpu_number: 21
 # Model paths
 torch_hub_dir: ""       # path to torch hub cache, e.g. /data/pretrain_models/torch_models
 pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_models
-methodology_kb_path: ""     # path to methodology/experience KB (e.g. ../paper-skills/experience_kb); empty = off
-methodology_dynamic: True   # True = LLM dynamic category search; False = static methodology_map.json
+methodology_kb_path: ""       # path to methodology/experience KB (e.g. ../paper-skills/experience_kb); empty = off
+methodology_retrieval: vector # vector = semantic retrieval | llm = LLM category match | static = methodology_map.json
+retr_alpha: 0.5               # hybrid weight: 1.0 = pure BM25, 0.0 = pure vector
+retr_pool: 30                 # candidates fetched before selection
+retr_top_n: 10                # max insights injected
+retr_min_score: 0.15          # keep hits scoring >= this fraction of the best hit
+retr_token_budget: 6000       # approx token cap on injected guidance
+retr_embedding_device: cpu    # cpu | cuda (must match the index's embedding model)
 
 # ============================================================
 #  Code execution
