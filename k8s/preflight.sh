@@ -35,14 +35,34 @@ if [ -f "${VENV_DIR}/bin/activate" ]; then
   source "${VENV_DIR}/bin/activate"
   [ "${VIRTUAL_ENV:-}" = "${VENV_DIR}" ] && ok "venv activated" \
     || bad "venv did not activate (built on another machine?) — rm -rf ${VENV_DIR} && bash k8s/setup-venv.sh"
-  python - <<'PY' 2>/dev/null && ok "python deps import (torch/omegaconf/pandas/rdkit)" || bad "python deps missing — rerun k8s/setup-venv.sh"
-import torch, omegaconf, pandas  # noqa
-try:
-    import rdkit  # noqa
-except ImportError:
-    raise SystemExit("rdkit missing (needed for molecular features)")
+  # Report exactly WHICH module is missing — "deps missing" alone is useless.
+  # Core = the run cannot start without it. Optional = task-specific, only a warning.
+  dep_out="$(python - <<'PY'
+core = ["torch", "omegaconf", "pandas", "numpy", "humanize", "rich", "openai", "anthropic",
+        "sklearn", "faiss", "rank_bm25"]
+optional = {"rdkit": "molecular features (this competition)",
+            "mlebench": "grading server (not needed when use_grading_server=False)",
+            "lightgbm": "gradient boosting", "xgboost": "gradient boosting"}
+miss_core, miss_opt = [], []
+for m in core:
+    try: __import__(m)
+    except Exception: miss_core.append(m)
+for m, why in optional.items():
+    try: __import__(m)
+    except Exception: miss_opt.append(f"{m} ({why})")
+print("CORE_MISSING=" + ",".join(miss_core))
+print("OPT_MISSING=" + ",".join(miss_opt))
 PY
-  python -c "import torch;print('  [info] cuda available:', torch.cuda.is_available())" 2>/dev/null
+)" || dep_out="CORE_MISSING=<python failed>"
+  core_missing="$(echo "${dep_out}" | sed -n 's/^CORE_MISSING=//p')"
+  opt_missing="$(echo "${dep_out}"  | sed -n 's/^OPT_MISSING=//p')"
+  if [ -z "${core_missing}" ]; then
+    ok "core python deps present"
+  else
+    bad "missing core deps: ${core_missing}  -> rerun k8s/setup-venv.sh"
+  fi
+  [ -n "${opt_missing}" ] && warn "optional deps absent: ${opt_missing}"
+  python -c "import torch;print('  [info] torch', torch.__version__, '| cuda available:', torch.cuda.is_available())" 2>/dev/null
 else
   bad "venv missing: ${VENV_DIR} — run k8s/setup-venv.sh"
 fi
@@ -66,7 +86,17 @@ if [ -f "${CFG}" ]; then
   else
     ok "no hardcoded api_key in config.yaml"
   fi
-  grep -qE '^\s*model:\s*claude' "${CFG}" && ok "model: claude (see config.yaml)" || warn "model is not claude — check config.yaml"
+  # config.yaml now reads creds from the environment: model: ${oc.env:LLM_MODEL,claude-...}
+  eff_model="$(cd "${REPO_DIR}" && python -c "
+from omegaconf import OmegaConf
+print(OmegaConf.load('config/config.yaml').agent.code.model)" 2>/dev/null)"
+  if [ -n "${eff_model}" ]; then
+    ok "effective model: ${eff_model}"
+  else
+    warn "could not resolve agent.code.model from config.yaml"
+  fi
+  grep -q 'oc.env:LLM_API_KEY' "${CFG}" && ok "api_key is read from \$LLM_API_KEY (not stored in git)" \
+    || warn "config.yaml does not read api_key from the environment"
 else
   bad "config.yaml missing"
 fi
