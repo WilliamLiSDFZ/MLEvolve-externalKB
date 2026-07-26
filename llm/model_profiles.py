@@ -171,6 +171,18 @@ def uses_max_completion_tokens(model_name: str) -> bool:
     return any(name.startswith(p) for p in _MAX_COMPLETION_TOKENS_PREFIXES)
 
 
+def is_openai_reasoning_model(model_name: str) -> bool:
+    """True for OpenAI reasoning models (GPT-5 family, o-series).
+
+    They reason by default, so `reasoning_effort` must be handled explicitly:
+    on /v1/chat/completions, function tools require reasoning_effort='none'
+    ("Function tools with reasoning_effort are not supported ... in /v1/chat/completions").
+    Structured outputs (json_schema) have no such restriction.
+    """
+    name = normalize_model_name(model_name)
+    return any(name.startswith(p) for p in _MAX_COMPLETION_TOKENS_PREFIXES)
+
+
 def get_thinking_extra_body(model_name: str) -> dict:
     """Return model-specific extra_body params for thinking mode (synced from agentic-mle)."""
     name = normalize_model_name(model_name)

@@ -10,7 +10,7 @@ from openai import OpenAI
 
 from config import Config
 from .gemini import FunctionSpec, compile_prompt_to_md
-from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name, supports_thinking_params, uses_max_completion_tokens
+from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name, supports_thinking_params, uses_max_completion_tokens, is_openai_reasoning_model
 
 logger = logging.getLogger("MLEvolve")
 
@@ -134,6 +134,16 @@ def query(
     # OpenAI-compat endpoint 400s on these, so drop them there.
     if use_thinking and supports_thinking_params(stage.base_url):
         extra_body.update(get_thinking_extra_body(model))
+
+    # OpenAI reasoning models reason by default. On /v1/chat/completions that is
+    # incompatible with function tools ("Function tools with reasoning_effort are not
+    # supported ... set reasoning_effort to 'none'"), so it must be disabled EXPLICITLY
+    # whenever we pass tools. Without tools, apply the configured effort.
+    if is_openai_reasoning_model(model):
+        if func_spec is not None:
+            extra_body["reasoning_effort"] = "none"
+        else:
+            extra_body.update(get_thinking_extra_body(model))
 
     # OpenAI reasoning models (GPT-5, o-series) reject `max_tokens`.
     _max_tok_key = "max_completion_tokens" if uses_max_completion_tokens(model) else "max_tokens"
@@ -267,6 +277,12 @@ def generate(
     # Merge model-specific thinking params (synced from agentic-mle). Anthropic's
     # OpenAI-compat endpoint 400s on these, so drop them there.
     if use_thinking and supports_thinking_params(stage.base_url):
+        extra_body.update(get_thinking_extra_body(model))
+
+    # This path never passes function tools — only structured outputs, which do NOT
+    # conflict with reasoning — so OpenAI reasoning models keep their configured effort.
+    # This is the main code-generation path, where reasoning matters most.
+    if is_openai_reasoning_model(model):
         extra_body.update(get_thinking_extra_body(model))
 
     # OpenAI reasoning models (GPT-5, o-series) reject `max_tokens`.
