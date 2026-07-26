@@ -55,7 +55,23 @@ install_reqs() {
 
 install_reqs requirements_base.txt
 install_reqs requirements_ml.txt
-install_reqs requirements_domain.txt
+
+# requirements_domain.txt is the union of EVERY mle-bench domain (vision, audio, NLP,
+# graph, geo, chem...). It is large, slow, and contains source-only packages that need a
+# compiler and a lot of RAM (e.g. jpegio, a 73MB sdist). For a single competition most of
+# it is dead weight:
+#   SKIP_DOMAIN=1     skip the layer entirely
+#   DOMAIN_ONLY="rdkit==2025.3.5 biopython==1.85"   install just these instead
+if [ -n "${SKIP_DOMAIN:-}" ]; then
+    echo "[setup] skipping requirements_domain.txt (SKIP_DOMAIN set)"
+elif [ -n "${DOMAIN_ONLY:-}" ]; then
+    echo "[setup] installing only: ${DOMAIN_ONLY}"
+    for pkg in ${DOMAIN_ONLY}; do
+        pip install --no-deps -q "${pkg}" || { echo "  [FAIL] ${pkg}"; echo "DOMAIN_ONLY: ${pkg}" >> "${FAILED_FILE}"; }
+    done
+else
+    install_reqs requirements_domain.txt
+fi
 
 if [ -s "${FAILED_FILE}" ]; then
     echo ""
