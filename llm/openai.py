@@ -10,7 +10,7 @@ from openai import OpenAI
 
 from config import Config
 from .gemini import FunctionSpec, compile_prompt_to_md
-from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name
+from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name, supports_thinking_params, uses_max_completion_tokens
 
 logger = logging.getLogger("MLEvolve")
 
@@ -130,14 +130,17 @@ def query(
         extra_body["top_k"] = profile["top_k"]
     if "enable_thinking" in profile:
         extra_body["enable_thinking"] = profile["enable_thinking"]
-    # Merge model-specific thinking params (synced from agentic-mle)
-    if use_thinking:
+    # Merge model-specific thinking params (synced from agentic-mle). Anthropic's
+    # OpenAI-compat endpoint 400s on these, so drop them there.
+    if use_thinking and supports_thinking_params(stage.base_url):
         extra_body.update(get_thinking_extra_body(model))
 
+    # OpenAI reasoning models (GPT-5, o-series) reject `max_tokens`.
+    _max_tok_key = "max_completion_tokens" if uses_max_completion_tokens(model) else "max_tokens"
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": filtered.get("max_tokens", 16384),
+        _max_tok_key: filtered.get("max_tokens", 16384),
     }
     # Claude Opus 4.7+/Fable 5 removed sampling params — sending them is a 400.
     if supports_sampling_params(model):
@@ -261,14 +264,17 @@ def generate(
         extra_body["top_k"] = profile["top_k"]
     if "enable_thinking" in profile:
         extra_body["enable_thinking"] = profile["enable_thinking"]
-    # Merge model-specific thinking params (synced from agentic-mle)
-    if use_thinking:
+    # Merge model-specific thinking params (synced from agentic-mle). Anthropic's
+    # OpenAI-compat endpoint 400s on these, so drop them there.
+    if use_thinking and supports_thinking_params(stage.base_url):
         extra_body.update(get_thinking_extra_body(model))
 
+    # OpenAI reasoning models (GPT-5, o-series) reject `max_tokens`.
+    _max_tok_key = "max_completion_tokens" if uses_max_completion_tokens(model) else "max_tokens"
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": max_tokens if max_tokens is not None else 16384,
+        _max_tok_key: max_tokens if max_tokens is not None else 16384,
         "stream": True,
     }
     # Claude Opus 4.7+/Fable 5 removed sampling params — sending them is a 400.

@@ -24,6 +24,18 @@ ruamel.yaml.clib==0.2.12
 pyaml==25.1.0
 toml==0.10.2
 omegaconf==2.3.0
+# Hard runtime dependency of omegaconf (`antlr4-python3-runtime==4.9.*`). Everything is
+# installed with --no-deps, so it must be pinned explicitly HERE: it used to live only in
+# requirements_domain.txt, and skipping/failing that optional layer left `import omegaconf`
+# broken — which breaks config loading, i.e. the entire run.
+antlr4-python3-runtime==4.9.3
+
+# Retrieval backends for the global memory layer (agents/memory/retriever.py) and the
+# cold-start KB. `agent.use_global_memory` defaults to True, so these are required for a
+# default run — they used to sit in the optional requirements_domain.txt layer.
+# NB: import names differ from the package names (faiss-cpu -> faiss, rank-bm25 -> rank_bm25).
+faiss-cpu==1.11.0
+rank-bm25==0.2.2
 hydra-core==1.3.2
 ConfigArgParse==1.7.1
 orjson==3.11.1

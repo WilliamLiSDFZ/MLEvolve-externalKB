@@ -89,6 +89,10 @@ _THINKING_EXTRA_BODY: dict[str, dict] = {
     "kimi":     {},                          # Kimi enables thinking by default
     "deepseek": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
     "gpt":      {},
+    # GPT-5 family: reasoning models with a tunable effort dial
+    # (none/low/medium/high/xhigh/max). MLE search benefits from long reasoning chains,
+    # so run at "high" — note this increases output tokens and therefore cost.
+    "gpt-5":    {"reasoning_effort": "high"},
     # Claude Opus 4.6/4.7 + Sonnet 4.6: adaptive thinking is the recommended
     # mode (required on Opus 4.7). Auto-enables interleaved thinking.
     "claude":   {"thinking": {"type": "adaptive"}},
@@ -108,8 +112,24 @@ _THINKING_JSON_INCOMPATIBLE = ("qwen",)
 _NO_TOOL_CHOICE_REQUIRED_PREFIXES = ("kimi", "deepseek", "claude")
 
 # Models that REJECT sampling params (temperature / top_p / presence_penalty) outright —
-# sending them returns a 400. Sampling params were removed on Claude Opus 4.7+ and Fable 5.
-_NO_SAMPLING_PARAMS_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable", "fable")
+# sending them returns a 400. Sampling params were removed on Claude Opus 4.7+ and Fable 5;
+# OpenAI's GPT-5 family are reasoning models and reject them too.
+_NO_SAMPLING_PARAMS_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable", "fable",
+                                "gpt-5", "o1", "o3", "o4")
+
+# Models that require `max_completion_tokens` instead of `max_tokens` on Chat Completions.
+# OpenAI reasoning models 400 on `max_tokens`: "Unsupported parameter".
+_MAX_COMPLETION_TOKENS_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def supports_thinking_params(base_url: str | None) -> bool:
+    """False for endpoints that reject Claude's extended/adaptive thinking.
+
+    Anthropic's OpenAI-compatibility layer (api.anthropic.com/v1/) returns
+    400 "Adaptive thinking is not available via the OpenAI compatibility endpoint."
+    Native Anthropic and pass-through gateways (OpenRouter, ...) do support it.
+    """
+    return "api.anthropic.com" not in (base_url or "")
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -143,6 +163,12 @@ def supports_sampling_params(model_name: str) -> bool:
     """Return False for models that 400 when temperature/top_p/etc. are sent."""
     name = normalize_model_name(model_name)
     return not any(name.startswith(p) for p in _NO_SAMPLING_PARAMS_PREFIXES)
+
+
+def uses_max_completion_tokens(model_name: str) -> bool:
+    """Return True for models that require `max_completion_tokens` over `max_tokens`."""
+    name = normalize_model_name(model_name)
+    return any(name.startswith(p) for p in _MAX_COMPLETION_TOKENS_PREFIXES)
 
 
 def get_thinking_extra_body(model_name: str) -> dict:

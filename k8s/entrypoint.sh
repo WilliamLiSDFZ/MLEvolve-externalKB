@@ -38,14 +38,19 @@ if [ "${VIRTUAL_ENV:-}" != "${VENV_DIR}" ]; then
 fi
 python - <<'PY' || { echo "FATAL: venv is missing dependencies — rerun k8s/setup-venv.sh"; exit 1; }
 import sys
-missing = []
+# Report the REAL exception, not just the name we tried to import: everything is installed
+# with --no-deps, so "import X" usually fails on a missing transitive dep of X, and printing
+# only "X" sends you looking in the wrong place.
+failed = []
 for m in ("torch", "omegaconf", "pandas", "humanize", "rich", "openai"):
     try:
         __import__(m)
-    except ImportError:
-        missing.append(m)
-if missing:
-    print("[entrypoint] missing modules:", ", ".join(missing), file=sys.stderr)
+    except Exception as e:
+        failed.append(f"{m}: {type(e).__name__}: {e}")
+if failed:
+    print("[entrypoint] dependency check failed:", file=sys.stderr)
+    for f in failed:
+        print("   -", f, file=sys.stderr)
     sys.exit(1)
 import torch
 print("[entrypoint] deps OK — torch", torch.__version__, "cuda", torch.cuda.is_available())

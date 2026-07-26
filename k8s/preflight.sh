@@ -45,8 +45,10 @@ optional = {"rdkit": "molecular features (this competition)",
             "lightgbm": "gradient boosting", "xgboost": "gradient boosting"}
 miss_core, miss_opt = [], []
 for m in core:
+    # Show the real exception: --no-deps installs mean the failure is usually a missing
+    # transitive dependency, not the module we named.
     try: __import__(m)
-    except Exception: miss_core.append(m)
+    except Exception as e: miss_core.append(f"{m} [{type(e).__name__}: {e}]")
 for m, why in optional.items():
     try: __import__(m)
     except Exception: miss_opt.append(f"{m} ({why})")
@@ -86,7 +88,7 @@ if [ -f "${CFG}" ]; then
   else
     ok "no hardcoded api_key in config.yaml"
   fi
-  # config.yaml now reads creds from the environment: model: ${oc.env:LLM_MODEL,claude-...}
+  # config.yaml reads creds from the environment: model: ${oc.env:LLM_MODEL,<default>}
   eff_model="$(cd "${REPO_DIR}" && python -c "
 from omegaconf import OmegaConf
 print(OmegaConf.load('config/config.yaml').agent.code.model)" 2>/dev/null)"

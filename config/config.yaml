@@ -69,15 +69,19 @@ agent:
   # Credentials come from the ENVIRONMENT, never from this file (it is in git) and never
   # from the command line (argv shows up in `ps` and in `set -x` logs).
   # Set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL — the k8s Secret provides them in-cluster.
+  # Defaults to OpenAI GPT-5.6 Terra (balance of intelligence and cost; `gpt-5.6-sol` is
+  # the flagship, `gpt-5.6-luna` the cheap one). GPT-5 models are reasoning models: they
+  # reject temperature/top_p/presence_penalty and require max_completion_tokens instead of
+  # max_tokens — llm/openai.py handles both automatically, so `temp` below is ignored here.
   code:
-    model: ${oc.env:LLM_MODEL,claude-opus-4-8}
+    model: ${oc.env:LLM_MODEL,gpt-5.6-terra}
     temp: 1
-    base_url: ${oc.env:LLM_BASE_URL,https://api.anthropic.com/v1/}
+    base_url: ${oc.env:LLM_BASE_URL,https://api.openai.com/v1}
     api_key: ${oc.env:LLM_API_KEY,""}
   feedback:
-    model: ${oc.env:LLM_MODEL,claude-opus-4-8}
+    model: ${oc.env:LLM_MODEL,gpt-5.6-terra}
     temp: 1
-    base_url: ${oc.env:LLM_BASE_URL,https://api.anthropic.com/v1/}
+    base_url: ${oc.env:LLM_BASE_URL,https://api.openai.com/v1}
     api_key: ${oc.env:LLM_API_KEY,""}
 
   # --- Submission check ---
