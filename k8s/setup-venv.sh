@@ -28,10 +28,48 @@ source "${VENV_DIR}/bin/activate"
 pip install --upgrade pip
 
 cd "${REPO_DIR}"
+
 # Order matters; versions are pinned and conflict if resolved together (see CLAUDE.md).
-pip install --no-deps -r requirements_base.txt
-pip install --no-deps -r requirements_ml.txt
-pip install --no-deps -r requirements_domain.txt
+# pip aborts the whole file on the first unsatisfiable pin, which turns cleaning up stale
+# requirements into one-error-per-run whack-a-mole. So: try the fast bulk install, and if
+# it fails, retry line-by-line and report EVERY bad pin at the end.
+FAILED_FILE="$(mktemp)"
+
+install_reqs() {
+    local req="$1"
+    echo "[setup] installing ${req} ..."
+    if pip install --no-deps -q -r "${req}"; then
+        return 0
+    fi
+    echo "[setup] bulk install of ${req} failed — retrying line by line to find the culprits"
+    while IFS= read -r line; do
+        line="${line%%#*}"                      # strip comments
+        line="$(echo "${line}" | xargs)"        # trim whitespace
+        [ -z "${line}" ] && continue
+        if ! pip install --no-deps -q "${line}" 2>/dev/null; then
+            echo "  [FAIL] ${line}"
+            echo "${req}: ${line}" >> "${FAILED_FILE}"
+        fi
+    done < "${req}"
+}
+
+install_reqs requirements_base.txt
+install_reqs requirements_ml.txt
+install_reqs requirements_domain.txt
+
+if [ -s "${FAILED_FILE}" ]; then
+    echo ""
+    echo "=============================================================="
+    echo "These pins could not be installed (all of them, in one pass):"
+    sed 's/^/  /' "${FAILED_FILE}"
+    echo ""
+    echo "Fix or remove them in the requirements files, then re-run this script."
+    echo "(Already-installed packages are skipped, so re-running is fast.)"
+    echo "=============================================================="
+    rm -f "${FAILED_FILE}"
+    exit 1
+fi
+rm -f "${FAILED_FILE}"
 
 # mle-bench (grading server imports mlebench.grade / mlebench.registry)
 if ! python -c "import mlebench" 2>/dev/null; then

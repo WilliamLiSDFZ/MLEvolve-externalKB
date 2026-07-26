@@ -210,7 +210,8 @@ pathos==0.3.4
 pox==0.3.6
 ppft==1.7.7
 py4j==0.10.9.9
-umap==0.1.1
+# umap==0.1.1 removed: no longer published on PyPI ("no matching distribution"), and it is
+# an unrelated legacy package — umap-learn below is the actual UMAP implementation.
 umap-learn==0.5.9.post2
 yacs==0.1.8
 alembic==1.15.1
