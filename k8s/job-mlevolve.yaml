@@ -55,7 +55,7 @@ spec:
           value: "/workspace/MLEvolve"
         # VENV_DIR defaults to ${REPO_DIR}/.venv (per-project venv) — set only to override
         - name: CPUS_PER_TASK
-          value: "8"               # keep in sync with resources below
+          value: "4"               # keep in sync with resources below
         - name: SERVER_ID
           value: "1"
         # This competition isn't in mle-bench, so the grading server can't score it.
@@ -67,14 +67,17 @@ spec:
         - secretRef:
             name: mlevolve-llm
             optional: true         # ok to run without the secret if config.yaml holds keys
-        resources:                 # Nautilus policy: requests == limits
+        # Nautilus policy: requests == limits. Keep this modest — GPU nodes are heavily
+        # contended, and a big ask can sit Pending for days. Dependency compilation (which
+        # needed 32Gi) happens once on the dev pod, not here.
+        resources:
           requests:
-            cpu: "8"
-            memory: 32Gi
+            cpu: "4"
+            memory: 16Gi
             nvidia.com/gpu: 1
           limits:
-            cpu: "8"
-            memory: 32Gi
+            cpu: "4"
+            memory: 16Gi
             nvidia.com/gpu: 1
         volumeMounts:
         - name: workspace

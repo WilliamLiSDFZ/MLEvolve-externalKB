@@ -1,0 +1,80 @@
+# CPU-only smoke test: prove the whole chain works without waiting for a GPU.
+#
+# Why: GPU nodes on Nautilus are heavily contended (a GPU pod can sit Pending for days).
+# This variant asks for no GPU, so it schedules almost immediately, and runs only a few
+# search steps — enough to verify data loading, the Claude API, code generation/execution,
+# and that a submission file is produced. Run the full GPU job (job-mlevolve.yaml) after
+# this passes.
+#
+# Launch:
+#   kubectl delete job mlevolve-smoke --ignore-not-found && kubectl apply -f k8s/job-mlevolve-smoke.yaml
+#   kubectl logs -f job/mlevolve-smoke
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-smoke
+  labels:
+    app: mlevolve
+    variant: smoke
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 5400      # 90 min hard stop — a smoke test should never run long
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        variant: smoke
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "openadmet"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        - name: DATA_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        - name: DESC_FILE
+          value: "/workspace/data/mlevolve/openadmet/description.md"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: CPUS_PER_TASK
+          value: "4"               # keep in sync with the cpu limit below
+        - name: SERVER_ID
+          value: "2"               # different from the GPU job, in case both ever run
+        - name: SKIP_GRADING_SERVER
+          value: "1"
+        - name: TIME_LIMIT_SECS
+          value: "3600"            # 1h agent budget (activeDeadline gives 90 min total)
+        # No GPU here, so the memory layer must embed on CPU (config defaults to cuda).
+        # A handful of steps is enough to prove the pipeline end to end.
+        - name: EXTRA_RUN_ARGS
+          value: "use_grading_server=False agent.memory_embedding_device=cpu agent.steps=3 agent.initial_drafts=1"
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # no nvidia.com/gpu -> schedules on any CPU node
+          requests:
+            cpu: "4"
+            memory: 16Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
