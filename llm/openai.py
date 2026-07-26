@@ -10,7 +10,7 @@ from openai import OpenAI
 
 from config import Config
 from .gemini import FunctionSpec, compile_prompt_to_md
-from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body
+from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name
 
 logger = logging.getLogger("MLEvolve")
 
@@ -121,7 +121,7 @@ def query(
     # tool_choice=required + thinking). Claude supports thinking + tool use
     # as long as tool_choice is auto/none — handled below by
     # _NO_TOOL_CHOICE_REQUIRED_PREFIXES, which keeps tool_choice=auto for Claude.
-    is_claude = model.lower().startswith("claude")
+    is_claude = normalize_model_name(model).startswith("claude")
     use_thinking = func_spec is None or is_claude
     profile = get_profile(model, use_thinking=use_thinking)
 
@@ -137,13 +137,15 @@ def query(
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": profile.get("temperature", filtered.get("temperature", 1.0)),
         "max_tokens": filtered.get("max_tokens", 16384),
     }
-    if "top_p" in profile:
-        params["top_p"] = profile["top_p"]
-    if "presence_penalty" in profile:
-        params["presence_penalty"] = profile["presence_penalty"]
+    # Claude Opus 4.7+/Fable 5 removed sampling params — sending them is a 400.
+    if supports_sampling_params(model):
+        params["temperature"] = profile.get("temperature", filtered.get("temperature", 1.0))
+        if "top_p" in profile:
+            params["top_p"] = profile["top_p"]
+        if "presence_penalty" in profile:
+            params["presence_penalty"] = profile["presence_penalty"]
     if extra_body:
         params["extra_body"] = extra_body
     if func_spec is not None:
@@ -250,7 +252,7 @@ def generate(
         json_schema = None
     # Claude: adaptive thinking + json_schema both supported — always keep thinking ON.
     # Other models: thinking on only when no json_schema (legacy Qwen-aligned behavior).
-    is_claude = model.lower().startswith("claude")
+    is_claude = normalize_model_name(model).startswith("claude")
     use_thinking = json_schema is None or is_claude
     profile = get_profile(model, use_thinking=use_thinking)
 
@@ -266,14 +268,17 @@ def generate(
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": profile.get("temperature", temperature if temperature is not None else 1.0),
         "max_tokens": max_tokens if max_tokens is not None else 16384,
         "stream": True,
     }
-    if "top_p" in profile:
-        params["top_p"] = profile["top_p"]
-    if "presence_penalty" in profile:
-        params["presence_penalty"] = profile["presence_penalty"]
+    # Claude Opus 4.7+/Fable 5 removed sampling params — sending them is a 400.
+    if supports_sampling_params(model):
+        params["temperature"] = profile.get(
+            "temperature", temperature if temperature is not None else 1.0)
+        if "top_p" in profile:
+            params["top_p"] = profile["top_p"]
+        if "presence_penalty" in profile:
+            params["presence_penalty"] = profile["presence_penalty"]
     if extra_body:
         params["extra_body"] = extra_body
     if stop_tokens:

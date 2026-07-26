@@ -107,28 +107,47 @@ _THINKING_JSON_INCOMPATIBLE = ("qwen",)
 # specific tool name will return a 400 error.
 _NO_TOOL_CHOICE_REQUIRED_PREFIXES = ("kimi", "deepseek", "claude")
 
+# Models that REJECT sampling params (temperature / top_p / presence_penalty) outright —
+# sending them returns a 400. Sampling params were removed on Claude Opus 4.7+ and Fable 5.
+_NO_SAMPLING_PARAMS_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable", "fable")
+
+
+def normalize_model_name(model_name: str) -> str:
+    """Lowercase and drop any provider prefix.
+
+    Gateways namespace models (e.g. OpenRouter's 'anthropic/claude-opus-4-8'), which
+    would otherwise defeat every startswith() check below.
+    """
+    return (model_name or "").lower().rsplit("/", 1)[-1]
+
 
 def thinking_json_incompatible(model_name: str) -> bool:
     """Return True for models that cannot use thinking + json_schema simultaneously."""
-    name = (model_name or "").lower()
+    name = normalize_model_name(model_name)
     return any(name.startswith(p) for p in _THINKING_JSON_INCOMPATIBLE)
 
 
 def supports_json_schema(model_name: str) -> bool:
     """Return False for models that require json_object instead of json_schema+strict."""
-    name = (model_name or "").lower()
+    name = normalize_model_name(model_name)
     return not any(name.startswith(p) for p in _NO_JSON_SCHEMA_PREFIXES)
 
 
 def supports_tool_choice_required(model_name: str) -> bool:
     """Return False for models that don't support tool_choice=required."""
-    name = (model_name or "").lower()
+    name = normalize_model_name(model_name)
     return not any(name.startswith(p) for p in _NO_TOOL_CHOICE_REQUIRED_PREFIXES)
+
+
+def supports_sampling_params(model_name: str) -> bool:
+    """Return False for models that 400 when temperature/top_p/etc. are sent."""
+    name = normalize_model_name(model_name)
+    return not any(name.startswith(p) for p in _NO_SAMPLING_PARAMS_PREFIXES)
 
 
 def get_thinking_extra_body(model_name: str) -> dict:
     """Return model-specific extra_body params for thinking mode (synced from agentic-mle)."""
-    name = (model_name or "").lower()
+    name = normalize_model_name(model_name)
     for key in sorted(_THINKING_EXTRA_BODY, key=len, reverse=True):
         if name.startswith(key):
             return dict(_THINKING_EXTRA_BODY[key])
@@ -140,7 +159,7 @@ def get_profile(model_name: str, use_thinking: bool = True) -> dict:
 
     Matches by longest prefix (case-insensitive). Falls back to 'default'.
     """
-    name = (model_name or "").lower()
+    name = normalize_model_name(model_name)
     for key in sorted(_PROFILES, key=len, reverse=True):
         if key == "default":
             continue

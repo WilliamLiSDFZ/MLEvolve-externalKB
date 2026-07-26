@@ -14,34 +14,40 @@ SERVER_ID=${3:-111}
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# ── Launch the local grading (format-validation) server ──
-export DATASET_DIR="${dataset_dir}"
-bash "$ROOT/launch_server.sh" "${SERVER_ID}"
-
 BASE_PORT=5005
 GRADING_SERVER_PORT=$((BASE_PORT + SERVER_ID))
 export GRADING_SERVER_PORT
+export DATASET_DIR="${dataset_dir}"
 
-echo "Waiting for grading server on port ${GRADING_SERVER_PORT} ..."
-MAX_WAIT=30
-WAITED=0
-while [ $WAITED -lt $MAX_WAIT ]; do
-    if curl -s "http://127.0.0.1:${GRADING_SERVER_PORT}/health" > /dev/null 2>&1; then
-        echo "Grading server ready (port ${GRADING_SERVER_PORT})."
-        break
+# ── Launch the local grading (format-validation) server ──
+# Skip for competitions that aren't in mle-bench (the server can't score them, and
+# waiting on its /health just costs 30s): SKIP_GRADING_SERVER=1
+if [ -n "${SKIP_GRADING_SERVER:-}" ]; then
+    echo "Skipping grading server (SKIP_GRADING_SERVER set)."
+else
+    bash "$ROOT/launch_server.sh" "${SERVER_ID}"
+
+    echo "Waiting for grading server on port ${GRADING_SERVER_PORT} ..."
+    MAX_WAIT=30
+    WAITED=0
+    while [ $WAITED -lt $MAX_WAIT ]; do
+        if curl -s "http://127.0.0.1:${GRADING_SERVER_PORT}/health" > /dev/null 2>&1; then
+            echo "Grading server ready (port ${GRADING_SERVER_PORT})."
+            break
+        fi
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    if [ $WAITED -ge $MAX_WAIT ]; then
+        echo "Warning: grading server may not be ready yet, proceeding anyway ..."
     fi
-    sleep 1
-    WAITED=$((WAITED + 1))
-done
-if [ $WAITED -ge $MAX_WAIT ]; then
-    echo "Warning: grading server may not be ready yet, proceeding anyway ..."
 fi
 
-# ── Experiment settings ──
-MEMORY_INDEX=0
-start_cpu=0
-CPUS_PER_TASK=21
-TIME_LIMIT_SECS=43200           # 12 hours
+# ── Experiment settings (env-overridable for containerized runs, see k8s/) ──
+MEMORY_INDEX=${MEMORY_INDEX:-0}
+start_cpu=${start_cpu:-0}
+CPUS_PER_TASK=${CPUS_PER_TASK:-21}
+TIME_LIMIT_SECS=${TIME_LIMIT_SECS:-43200}   # 12 hours
 
 export MEMORY_INDEX
 format_time() {
@@ -63,14 +69,24 @@ CLOSEST_EXP_NAME="${TIMESTAMP}_${EXP_ID}"
 
 
 # ── Run the main agent loop ──
+# Data layout: defaults to the mle-bench convention
+# (<dataset_dir>/<EXP_ID>/prepared/public), but DATA_DIR / DESC_FILE override it so the
+# data can live anywhere (e.g. a flat dir of csv+md on a PVC).
+DATA_DIR="${DATA_DIR:-${dataset_dir}/${EXP_ID}/prepared/public}"
+DESC_FILE="${DESC_FILE:-${DATA_DIR}/description.md}"
+
+# EXTRA_RUN_ARGS: optional extra OmegaConf dotlist overrides (e.g. API keys injected
+# from a k8s Secret by k8s/entrypoint.sh: "agent.code.api_key=... agent.code.model=...").
+# Intentionally unquoted so it expands into separate words.
 CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-after=10s "${TIME_LIMIT_SECS}s" python run.py \
   exp_id="${EXP_ID}" \
   dataset_dir="${dataset_dir}" \
-  data_dir="${dataset_dir}/${EXP_ID}/prepared/public" \
-  desc_file="${dataset_dir}/${EXP_ID}/prepared/public/description.md" \
+  data_dir="${DATA_DIR}" \
+  desc_file="${DESC_FILE}" \
   exp_name="${EXP_ID}" \
   start_cpu_id="${start_cpu}" \
-  cpu_number="${CPUS_PER_TASK}"
+  cpu_number="${CPUS_PER_TASK}" \
+  ${EXTRA_RUN_ARGS:-}
 
 RUN_EXIT=$?
 

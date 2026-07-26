@@ -326,11 +326,22 @@ def build_methodology_guidance(task_desc: str, methodology_kb_path: str, cfg: An
     cfg.agent.code.
     """
     kb_base = Path(methodology_kb_path)
+    mode = str(getattr(cfg, "methodology_retrieval", "vector")).lower()
+
+    if mode == "lazy":
+        # Abstract-level retrieval + on-demand extraction. The methodology cache tree
+        # may not exist yet on a fresh setup — ondemand creates it as it extracts.
+        try:
+            from engine.coldstart.ondemand import build_lazy_guidance
+            return build_lazy_guidance(task_desc, cfg)
+        except Exception as e:
+            logger.warning(f"[MethodologyAgent] lazy retrieval failed ({e}); returning empty")
+            return ""
+
     if not kb_base.exists():
         logger.info("[MethodologyAgent] methodology_kb_path not found, skipping")
         return ""
 
-    mode = str(getattr(cfg, "methodology_retrieval", "vector")).lower()
     llm_cfg = cfg.agent.code
 
     if mode == "vector":

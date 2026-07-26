@@ -22,8 +22,18 @@ cpu_number: 21
 # Model paths
 torch_hub_dir: ""       # path to torch hub cache, e.g. /data/pretrain_models/torch_models
 pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_models
-methodology_kb_path: ""       # path to methodology/experience KB (e.g. ../paper-skills/experience_kb); empty = off
-methodology_retrieval: vector # vector = semantic retrieval | llm = LLM category match | static = methodology_map.json
+methodology_kb_path: ""       # vector/llm/static: KB with index|insight.md; lazy: methodology_kb ROOT (extraction cache tree). empty = off
+methodology_retrieval: vector # vector = insight-index retrieval | llm = LLM category match | static = methodology_map.json | lazy = abstract-index + on-demand extraction
+
+# --- lazy mode (methodology_retrieval: lazy) ---
+abstract_index_path: ""       # dir with the abstract index (records.jsonl/embeddings.npy/manifest.json)
+lazy_pool: 40                 # abstract-retrieval candidates (recall-oriented)
+lazy_min_score: 0.05          # LOW relative threshold (precision recovered at assembly)
+max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
+lazy_extract_workers: 4       # concurrent PDF+LLM extractions
+lazy_technique_rerank: True   # True = 2nd-stage technique-level retrieval over extracted content | False = inject paper-level, ranked by abstract score
+lazy_tech_top_n: 12           # max techniques injected (rerank mode)
+lazy_tech_min_score: 0.3      # relative threshold for technique similarity (precision-oriented)
 retr_alpha: 0.5               # hybrid weight: 1.0 = pure BM25, 0.0 = pure vector
 retr_pool: 30                 # candidates fetched before selection
 retr_top_n: 10                # max insights injected
@@ -51,16 +61,24 @@ agent:
   data_preview: True
 
   # --- LLM models ---
+  # Claude Opus 4.8 via Anthropic's OpenAI-compatible endpoint.
+  # NOTE: Opus 4.7+ removed sampling params — `temp` below is IGNORED for these models
+  # (llm/openai.py omits temperature/top_p entirely; sending them returns 400).
+  # Using a gateway instead (e.g. OpenRouter)? Set base_url to the gateway and model to
+  # "anthropic/claude-opus-4-8" — the provider prefix is handled.
+  # Credentials come from the ENVIRONMENT, never from this file (it is in git) and never
+  # from the command line (argv shows up in `ps` and in `set -x` logs).
+  # Set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL — the k8s Secret provides them in-cluster.
   code:
-    model: gemini-3-pro-preview
+    model: ${oc.env:LLM_MODEL,claude-opus-4-8}
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: ${oc.env:LLM_BASE_URL,https://api.anthropic.com/v1/}
+    api_key: ${oc.env:LLM_API_KEY,""}
   feedback:
-    model: gemini-3-pro-preview
+    model: ${oc.env:LLM_MODEL,claude-opus-4-8}
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: ${oc.env:LLM_BASE_URL,https://api.anthropic.com/v1/}
+    api_key: ${oc.env:LLM_API_KEY,""}
 
   # --- Submission check ---
   check_data_leakage: True

@@ -1,0 +1,94 @@
+# MLEvolve competition run as a Kubernetes Job (NRP Nautilus).
+#
+# Assumptions (see k8s/README.md):
+#   - PVC `yuze-li-vol` mounted at /workspace, containing:
+#       /workspace/MLEvolve          <- this repo (git clone/pull from the dev pod)
+#       /workspace/venv              <- python venv built once via k8s/setup-venv.sh
+#       /workspace/mle-bench/data    <- mle-bench datasets
+#   - Optional Secret `mlevolve-llm` with LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+#     (see secret-llm.example.yaml). If absent, fill config/config.yaml on the PVC instead
+#     and delete the envFrom block below.
+#
+# Launch (one job per competition; EXP_ID must be dns-safe lowercase):
+#   EXP_ID=spooky-author-identification
+#   sed "s/__EXP_ID__/${EXP_ID}/g" k8s/job-mlevolve.yaml | kubectl -n <NAMESPACE> apply -f -
+#
+# Monitor / logs / cleanup:
+#   kubectl -n <NAMESPACE> get pods -l job-name=mlevolve-__EXP_ID__
+#   kubectl -n <NAMESPACE> logs -f job/mlevolve-__EXP_ID__
+#   kubectl -n <NAMESPACE> delete job mlevolve-__EXP_ID__
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-openadmet
+  labels:
+    app: mlevolve
+spec:
+  backoffLimit: 0                  # no auto-retry: a failed 12h GPU run should be inspected, not repeated
+  activeDeadlineSeconds: 46800     # hard stop at 13h (12h agent budget + overhead)
+  ttlSecondsAfterFinished: 259200  # auto-clean the Job object after 3 days
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        # Must match the dev pod image (the venv on the PVC is built there) and the pins:
+        # torch==2.7.1 + nvidia-*-cu12==12.6.x, and Python >= 3.11 (scipy==1.16.2 needs it —
+        # the older 2.3.0 image ships Python 3.10 and the install fails).
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: openadmet
+        - name: DATASET_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        # Flat data layout (train.csv/test.csv/description.md in one dir). Omit DATA_DIR +
+        # DESC_FILE to fall back to <DATASET_DIR>/<EXP_ID>/prepared/public instead.
+        - name: DATA_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        - name: DESC_FILE
+          value: "/workspace/data/mlevolve/openadmet/description.md"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        # VENV_DIR defaults to ${REPO_DIR}/.venv (per-project venv) — set only to override
+        - name: CPUS_PER_TASK
+          value: "8"               # keep in sync with resources below
+        - name: SERVER_ID
+          value: "1"
+        # This competition isn't in mle-bench, so the grading server can't score it.
+        - name: EXTRA_RUN_ARGS
+          value: "use_grading_server=False"
+        - name: SKIP_GRADING_SERVER
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true         # ok to run without the secret if config.yaml holds keys
+        resources:                 # Nautilus policy: requests == limits
+          requests:
+            cpu: "8"
+            memory: 32Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 32Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm               # torch DataLoader workers need >64Mi shared memory
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+      # Optionally pin a GPU type (check availability first):
+      # nodeSelector:
+      #   nvidia.com/gpu.product: NVIDIA-GeForce-RTX-3090

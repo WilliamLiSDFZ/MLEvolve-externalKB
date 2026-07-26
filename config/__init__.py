@@ -152,6 +152,14 @@ class Config(Hashable):
 
     methodology_kb_path: str = ""
     methodology_retrieval: str = "vector"
+    abstract_index_path: str = ""
+    lazy_pool: int = 40
+    lazy_min_score: float = 0.05
+    max_extractions_per_coldstart: int = 20
+    lazy_extract_workers: int = 4
+    lazy_technique_rerank: bool = True
+    lazy_tech_top_n: int = 12
+    lazy_tech_min_score: float = 0.3
     retr_alpha: float = 0.5
     retr_pool: int = 30
     retr_top_n: int = 10
