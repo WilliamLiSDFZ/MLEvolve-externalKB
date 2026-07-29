@@ -1,0 +1,103 @@
+# MLEvolve WITH the external knowledge base — treatment arm of the KB ablation.
+#
+# Paired with k8s/job-mlevolve.yaml (the KB-off baseline). Everything except the KB
+# settings is IDENTICAL to the baseline on purpose: same image, resources, time budget,
+# step count and model, so any difference in the final MA-RAE is attributable to the KB.
+#
+#   baseline (KB off) : job-mlevolve.yaml   -> MA-RAE 0.4264 (12 h run, 2026-07-27)
+#   treatment (KB on) : this file
+#
+# Retrieval mode is "lazy": the abstract index (built once, no LLM cost) covers ALL ~423
+# categories across neurips/icml/acl/aaai/naacl, and only the papers retrieved for this
+# task get deep-extracted at cold-start. The pre-built `paperinsight` index is NOT used
+# here — it only holds 37 NLP insights, which are irrelevant to molecular ADMET.
+#
+# ── Prerequisites (once, on the dev pod) ──────────────────────────────────────────────
+#   1. Build the abstract index:
+#        cd /workspace/Agentic_Knowledge_Base
+#        export HF_ENDPOINT=https://hf-mirror.com     # only if huggingface.co is blocked
+#        python scripts/6_build_abstract_index.py --venues all
+#   2. Install the PDF extractor into MLEvolve's venv (lazy mode needs it; without it
+#      extraction is silently skipped and the run is effectively KB-off):
+#        source /workspace/MLEvolve/.venv/bin/activate && pip install --no-deps pymupdf4llm
+#
+# ── Launch ───────────────────────────────────────────────────────────────────────────
+#   kubectl delete job mlevolve-openadmet-kb --ignore-not-found
+#   kubectl apply -f k8s/job-mlevolve-kb.yaml
+#   kubectl logs -f job/mlevolve-openadmet-kb | grep -E "\[Lazy\]|best\] updated|Progress:"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-openadmet-kb
+  labels:
+    app: mlevolve
+    variant: kb-on
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800     # 13 h hard stop (12 h agent budget + overhead)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        variant: kb-on
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "openadmet-kb"     # separate run dir, so the baseline is not overwritten
+        - name: DATASET_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        - name: DATA_DIR
+          value: "/workspace/data/mlevolve/openadmet"
+        - name: DESC_FILE
+          value: "/workspace/data/mlevolve/openadmet/description.md"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: CPUS_PER_TASK
+          value: "4"                # keep in sync with the cpu limit below
+        - name: SERVER_ID
+          value: "3"                # distinct from baseline (1) and smoke (2)
+        - name: SKIP_GRADING_SERVER
+          value: "1"
+        # The ONLY difference from the baseline: knowledge-base retrieval is enabled.
+        #   methodology_retrieval=lazy  -> abstract search + on-demand deep extraction
+        #   methodology_kb_path         -> methodology_kb ROOT (where extractions are cached,
+        #                                  reused by later runs — this is deliberate)
+        #   abstract_index_path         -> the prebuilt abstract index
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            use_grading_server=False
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to the baseline (Nautilus: requests == limits)
+          requests:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm               # torch DataLoader workers need >64Mi shared memory
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
