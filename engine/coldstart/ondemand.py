@@ -29,6 +29,7 @@ from typing import Any, List, Optional, Tuple
 logger = logging.getLogger("MLEvolve")
 
 _ABS_CACHE: dict = {}   # abstract_index_path -> retriever
+_PDF_IMPORT_WARNED = False   # log the PDF-extractor import failure once, not per paper
 
 EXTRACT_PROMPT = """Extract techniques from this ML/NLP paper. For each technique or design choice, identify whether it had a positive, negative, or neutral effect on results.
 
@@ -120,19 +121,31 @@ def _download(url: str, dest: Path, timeout: int = 30, retries: int = 3) -> bool
 
 
 def _chat(llm_cfg: Any, user_msg: str, max_tokens: int = 4096) -> str:
-    if (llm_cfg.model or "").lower().startswith("glm"):
+    model = llm_cfg.model or ""
+    if model.lower().startswith("glm"):
         import anthropic
         client = anthropic.Anthropic(api_key=llm_cfg.api_key,
                                      base_url=llm_cfg.base_url or None, timeout=1200.0)
-        resp = client.messages.create(model=llm_cfg.model, temperature=0,
+        resp = client.messages.create(model=model, temperature=0,
                                       max_tokens=max_tokens,
                                       messages=[{"role": "user", "content": user_msg}])
         return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text") or ""
+
+    # Reuse the central per-model rules rather than re-deriving them here: OpenAI
+    # reasoning models (GPT-5, o-series) reject `max_tokens` AND sampling params.
+    from llm.model_profiles import supports_sampling_params, uses_max_completion_tokens
     from openai import OpenAI
+
+    params: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": user_msg}],
+        ("max_completion_tokens" if uses_max_completion_tokens(model) else "max_tokens"): max_tokens,
+    }
+    if supports_sampling_params(model):
+        params["temperature"] = 0
+
     client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
-    resp = client.chat.completions.create(model=llm_cfg.model, temperature=0,
-                                          max_tokens=max_tokens,
-                                          messages=[{"role": "user", "content": user_msg}])
+    resp = client.chat.completions.create(**params)
     return resp.choices[0].message.content or ""
 
 
@@ -172,8 +185,17 @@ def _extract_one(rec: PaperRecord, kb_root: Path, llm_cfg: Any) -> bool:
     """Extract one paper into the methodology cache. Returns True on success."""
     try:
         import pymupdf4llm
-    except ImportError:
-        logger.warning("[Lazy] pymupdf4llm not installed — skipping extraction")
+    except Exception as e:
+        # Report the REAL exception: with --no-deps installs the failure is usually a
+        # missing transitive dep (pymupdf4llm needs pymupdf), not the package we named.
+        global _PDF_IMPORT_WARNED
+        if not _PDF_IMPORT_WARNED:
+            _PDF_IMPORT_WARNED = True
+            logger.warning(
+                "[Lazy] cannot import pymupdf4llm (%s: %s) — extraction disabled for this run. "
+                "Fix with:  pip install pymupdf4llm   (without --no-deps, so pymupdf comes too)",
+                type(e).__name__, e,
+            )
         return False
 
     pdf_url = _resolve_pdf(rec)

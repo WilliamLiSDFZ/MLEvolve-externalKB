@@ -73,17 +73,24 @@ def _match_categories_with_llm(task_desc: str, categories: List[str], cfg: Any) 
             )
             response = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text") or ""
         else:
+            # Same per-model rules as llm/openai.py: OpenAI reasoning models (GPT-5,
+            # o-series) reject `max_tokens` and sampling params.
+            from llm.model_profiles import supports_sampling_params, uses_max_completion_tokens
             from openai import OpenAI
-            client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None)
-            resp = client.chat.completions.create(
-                model=cfg.model,
-                temperature=0,
-                max_tokens=256,
-                messages=[
+
+            params: dict = {
+                "model": cfg.model,
+                "messages": [
                     {"role": "system", "content": "You are a research category selector. Output only category names, one per line."},
                     {"role": "user", "content": user_msg},
                 ],
-            )
+                ("max_completion_tokens" if uses_max_completion_tokens(cfg.model) else "max_tokens"): 256,
+            }
+            if supports_sampling_params(cfg.model):
+                params["temperature"] = 0
+
+            client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url or None)
+            resp = client.chat.completions.create(**params)
             response = resp.choices[0].message.content or ""
         matched = []
         for line in response.strip().splitlines():

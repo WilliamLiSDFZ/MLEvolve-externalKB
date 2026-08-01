@@ -42,7 +42,8 @@ core = ["torch", "omegaconf", "pandas", "numpy", "humanize", "rich", "openai", "
         "sklearn", "faiss", "rank_bm25"]
 optional = {"rdkit": "molecular features (this competition)",
             "mlebench": "grading server (not needed when use_grading_server=False)",
-            "lightgbm": "gradient boosting", "xgboost": "gradient boosting"}
+            "lightgbm": "gradient boosting", "xgboost": "gradient boosting",
+            "pymupdf4llm": "PDF extraction — REQUIRED for methodology_retrieval=lazy"}
 miss_core, miss_opt = [], []
 for m in core:
     # Show the real exception: --no-deps installs mean the failure is usually a missing
