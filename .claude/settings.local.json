@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_base.txt)",
+      "Bash(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_ml.txt)",
+      "Bash(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_domain.txt)",
+      "Bash(echo \"base: $\\(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_base.txt\\) pkgs, ml: $\\(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_ml.txt\\) pkgs, domain: $\\(grep -cvE '^\\\\s*#|^\\\\s*$' requirements_domain.txt\\) pkgs\")",
+      "Bash(python3 -c \"import platform; print\\(platform.platform\\(\\), platform.machine\\(\\)\\)\")",
+      "Bash(conda create *)",
+      "Bash(/opt/miniconda3/envs/mlevolve/bin/pip install *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//tmp/**)",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('engine/coldstart/models_guidance_classified.json'\\)\\); print\\('top keys:', list\\(d.keys\\(\\)\\)\\); k=list\\(d.keys\\(\\)\\)[0]; print\\('models in', k, ':', list\\(d[k].keys\\(\\)\\)\\); import itertools; mk=list\\(d[k].keys\\(\\)\\)[0]; print\\('fields of one model:', list\\(d[k][mk].keys\\(\\)\\)\\)\")"
+    ]
+  }
+}
