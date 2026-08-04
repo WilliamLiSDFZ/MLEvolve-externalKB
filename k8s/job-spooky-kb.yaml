@@ -80,14 +80,16 @@ spec:
         - secretRef:
             name: mlevolve-llm
             optional: true
+        # See job-spooky-baseline.yaml for why 16Gi was not enough (OOMKilled at 8h37m).
+        # Both arms must stay identical here or the A/B is confounded by compute budget.
         resources:                 # identical to the control arm
           requests:
             cpu: "4"
-            memory: 16Gi
+            memory: 32Gi
             nvidia.com/gpu: 1
           limits:
             cpu: "4"
-            memory: 16Gi
+            memory: 32Gi
             nvidia.com/gpu: 1
         volumeMounts:
         - name: workspace
@@ -101,4 +103,4 @@ spec:
       - name: dshm
         emptyDir:
           medium: Memory
-          sizeLimit: 8Gi
+          sizeLimit: 2Gi           # counts against the container memory limit — keep small

@@ -67,14 +67,20 @@ spec:
         - secretRef:
             name: mlevolve-llm
             optional: true
+        # 16Gi OOMKilled this job at 8h37m (exit 137). Two compounding causes:
+        #   1. agent.search.parallel_search_num=3 -> three training subprocesses at once.
+        #   2. the dshm volume below is `medium: Memory`, i.e. a tmpfs whose pages are
+        #      CHARGED TO THIS CONTAINER'S MEMORY LIMIT. An 8Gi sizeLimit therefore let
+        #      /dev/shm claim half the budget, leaving ~8Gi for three trainers.
+        # Fix: raise to 32Gi and shrink dshm to 2Gi (DataLoader workers need far less).
         resources:                 # Nautilus policy: requests == limits
           requests:
             cpu: "4"
-            memory: 16Gi
+            memory: 32Gi
             nvidia.com/gpu: 1
           limits:
             cpu: "4"
-            memory: 16Gi
+            memory: 32Gi
             nvidia.com/gpu: 1
         volumeMounts:
         - name: workspace
@@ -88,4 +94,4 @@ spec:
       - name: dshm
         emptyDir:
           medium: Memory
-          sizeLimit: 8Gi
+          sizeLimit: 2Gi           # counts against the container memory limit — keep small
