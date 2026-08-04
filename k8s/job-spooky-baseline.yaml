@@ -1,0 +1,91 @@
+# spooky-author-identification — CONTROL arm (knowledge base OFF).
+#
+# Paired with job-spooky-kb.yaml. Everything except the KB settings is identical, so any
+# difference in the final score is attributable to the knowledge base.
+#
+# Why this task: 3-class author classification (log loss) from mle-bench's low-complexity
+# split. Two reasons it is a better KB testbed than OpenADMET:
+#   1. The KB corpus is strongest here — ~27% of categories are NLP/LLM, including five on
+#      text classification directly (hierarchical / multilingual / applied / active-learning
+#      / adversarial). Molecular property prediction had 3 relevant categories out of 423.
+#   2. It IS an mle-bench competition, so the grading server produces OFFICIAL scores.
+#      The OpenADMET runs had to self-report local validation, which proved unreliable
+#      (local 0.19 vs real test 0.74) and made the KB comparison unmeasurable.
+#
+# Prerequisite — prepare the dataset once on the dev pod:
+#   source /workspace/MLEvolve/.venv/bin/activate
+#   mlebench prepare -c spooky-author-identification --data-dir /workspace/data/mlebench
+#   # needs Kaggle API credentials (~/.kaggle/kaggle.json) and competition rules accepted
+#
+# Launch:
+#   kubectl delete job mlevolve-spooky-base --ignore-not-found
+#   kubectl apply -f k8s/job-spooky-baseline.yaml
+#   kubectl logs -f job/mlevolve-spooky-base | grep -E "\[best\] updated|Progress:"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-spooky-base
+  labels:
+    app: mlevolve
+    experiment: spooky
+    variant: kb-off
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800     # 13 h hard stop (12 h agent budget + overhead)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: spooky
+        variant: kb-off
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "spooky-author-identification"     # must match the mle-bench competition id
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        # No DATA_DIR/DESC_FILE: fall back to the mle-bench convention
+        # <DATASET_DIR>/<EXP_ID>/prepared/public, which `mlebench prepare` creates.
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        # Run directory label (EXP_ID stays the competition id for grading).
+        - name: EXP_NAME
+          value: "spooky-base"
+        - name: CPUS_PER_TASK
+          value: "4"                # keep in sync with the cpu limit below
+        - name: SERVER_ID
+          value: "4"                # distinct port per concurrent run (5005 + id)
+        # Grading server ON: this is a real mle-bench competition, so submissions are
+        # scored officially instead of by the agent's own validation split.
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # Nautilus policy: requests == limits
+          requests:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm               # torch DataLoader workers need >64Mi shared memory
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi

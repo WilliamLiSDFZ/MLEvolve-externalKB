@@ -32,8 +32,9 @@ lazy_min_score: 0.05          # LOW relative threshold (precision recovered at a
 max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
 lazy_extract_workers: 4       # concurrent PDF+LLM extractions
 lazy_technique_rerank: True   # True = 2nd-stage technique-level retrieval over extracted content | False = inject paper-level, ranked by abstract score
-retr_center_embeddings: True  # mean-center dense vectors (fixes anisotropy: top-10 on-topic 5/10 -> 8/10)
-retr_focus_query: True        # query = task-describing sections only, not the whole description (incl. submission format/citation)
+retr_center_embeddings: True  # mean-center dense vectors (fixes anisotropy; validated on 2 tasks: 4->8/10 and 8->9/10 on-topic)
+retr_query_mode: llm          # llm = distil the description into a short ML-task statement (one cached LLM call) | raw = use the description as-is
+retr_query_cache_dir: ""      # where distilled queries are cached; empty = <abstract_index_path>/../query_cache
 lazy_tech_top_n: 12           # max techniques injected (rerank mode)
 lazy_tech_min_score: 0.3      # relative threshold for technique similarity (precision-oriented)
 retr_alpha: 0.5               # hybrid weight: 1.0 = pure BM25, 0.0 = pure vector

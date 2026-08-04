@@ -15,6 +15,7 @@ Flow (methodology_retrieval: "lazy"):
 Cost: the abstract index is free (local embeddings); per task you pay only for the capped
 extractions, which amortize to zero as the cache warms.
 """
+import hashlib
 import json
 import logging
 import os
@@ -380,56 +381,75 @@ def _assemble(available: List[Tuple[PaperRecord, float]], kb_root: Path,
 
 # ------------------------------------------------------------------ query building
 
-# Sections of a competition description that carry no retrieval signal: they describe
-# submission mechanics, not the ML problem, and their generic wording dilutes both the
-# dense vector and the BM25 term statistics.
-_QUERY_DROP_HEADINGS = (
-    "submission file", "file descriptions", "citation", "prizes", "timeline",
-    "getting started", "required submission format", "task and metric alignment",
-    # Metric formulas are long and describe scoring plumbing; knowing the loss is called
-    # "MA-RAE" does not help find papers about the underlying ML problem.
-    "evaluation",
-)
-# Generous enough to reach the data-characteristics section, which usually sits at the END
-# of a description yet carries the most retrieval signal (label sparsity, task structure).
+# Fallback cap when no distilled query is available: the raw description, truncated.
 _QUERY_MAX_CHARS = 2500
+
+_DISTILL_PROMPT = """Below is a machine-learning competition description. Write a single
+compact paragraph (50-80 words) that will be used as a SEARCH QUERY to find relevant
+research papers.
+
+Describe only the machine-learning problem:
+- input data type and scale
+- task type (e.g. multi-class classification, multi-task regression)
+- evaluation metric
+- modelling techniques and data characteristics likely to matter
+
+Exclude everything else: prizes, timelines, eligibility, submission file formats, file
+lists, citations, and narrative/flavour text. Write plain prose, no headings or bullets.
+
+Competition description:
+{desc}
+
+Search query:"""
+
+
+def _distill_query(task_desc: str, cfg: Any) -> str:
+    """Compress the description into a short ML-task statement via one LLM call.
+
+    Why not rules: a heading-based extractor was tried and does NOT generalise. Competition
+    descriptions differ wildly — for OpenADMET the signal sat in a trailing "data
+    characteristics" section, while for spooky-author-identification it sat in "Evaluation"
+    (which the rules discarded), leaving only horror-story flavour text. Measured top-10
+    on-topic hits: raw description 2/10, rule-extracted 0/10, hand-written summary 9/10.
+    The query is the whole ballgame, so it is worth one LLM call to get it right.
+
+    The result is cached on disk keyed by a hash of the description, so a task is distilled
+    once and every later run — including both arms of an A/B — reuses the identical query.
+    """
+    cache_dir = Path(getattr(cfg, "retr_query_cache_dir", "") or
+                     (Path(getattr(cfg, "abstract_index_path", ".")) .parent / "query_cache"))
+    key = hashlib.sha1(task_desc.encode("utf-8")).hexdigest()[:16]
+    cache_file = cache_dir / f"{key}.txt"
+
+    if cache_file.exists():
+        cached = cache_file.read_text(encoding="utf-8").strip()
+        if cached:
+            logger.info(f"[Lazy] distilled query (cached): {cached[:120]}...")
+            return cached
+
+    query = _chat(cfg.agent.code, _DISTILL_PROMPT.format(desc=task_desc[:12000]),
+                  max_tokens=300).strip()
+    if len(query) < 40:
+        raise ValueError(f"distilled query too short: {query!r}")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = cache_file.with_suffix(".tmp")
+    tmp.write_text(query, encoding="utf-8")
+    os.replace(tmp, cache_file)
+    logger.info(f"[Lazy] distilled query (new, cached to {cache_file.name}): {query[:120]}...")
+    return query
 
 
 def _build_query(task_desc: str, cfg: Any) -> str:
-    """Build the retrieval query from the task description.
-
-    Embedding the WHOLE description (submission format, file lists, citation, ...) yields a
-    diffuse "average" query. Measured on this corpus: with the full description, lexical
-    retrieval returned mostly off-topic papers; with a short task-focused query it returned
-    10/10 on-topic. So keep only the sections describing the ML problem, and cap the length.
-
-    Rule-based on purpose — no extra LLM call, deterministic and reproducible, which matters
-    for A/B runs. Falls back to plain truncation if the headings don't parse as expected.
-    """
-    if not bool(getattr(cfg, "retr_focus_query", True)):
-        return task_desc.strip()
-
-    kept, skipping = [], False
-    for line in task_desc.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            heading = stripped.lstrip("#").strip().lower()
-            skipping = any(h in heading for h in _QUERY_DROP_HEADINGS)
-            if not skipping:
-                kept.append(stripped.lstrip("#").strip())
-            continue
-        if skipping:
-            continue
-        # Drop code fences / table rows / rules — layout, not meaning.
-        if stripped.startswith(("```", "|", "---", "===")):
-            continue
-        if stripped:
-            kept.append(stripped)
-
-    query = " ".join(kept).strip()
-    if len(query) < 100:                       # parsing produced nothing usable
-        query = task_desc.strip()
-    return query[:_QUERY_MAX_CHARS]
+    """Build the retrieval query. Mode: "llm" (default, distilled + cached) or "raw"."""
+    mode = str(getattr(cfg, "retr_query_mode", "llm")).lower()
+    if mode == "llm":
+        try:
+            return _distill_query(task_desc, cfg)
+        except Exception as e:
+            logger.warning(f"[Lazy] query distillation failed ({type(e).__name__}: {e}); "
+                           f"falling back to the raw description")
+    return task_desc.strip()[:_QUERY_MAX_CHARS]
 
 
 # ------------------------------------------------------------------ entry point

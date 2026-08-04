@@ -161,7 +161,8 @@ class Config(Hashable):
     lazy_tech_top_n: int = 12
     lazy_tech_min_score: float = 0.3
     retr_center_embeddings: bool = True
-    retr_focus_query: bool = True
+    retr_query_mode: str = "llm"
+    retr_query_cache_dir: str = ""
     retr_alpha: float = 0.5
     retr_pool: int = 30
     retr_top_n: int = 10

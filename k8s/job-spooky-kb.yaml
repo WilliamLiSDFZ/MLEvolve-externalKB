@@ -1,0 +1,104 @@
+# spooky-author-identification — TREATMENT arm (knowledge base ON).
+#
+# Paired with job-spooky-baseline.yaml. Only the KB settings and the isolation identifiers
+# (job name, EXP_ID suffix, SERVER_ID) differ — image, resources, time budget and model are
+# identical so the comparison is clean.
+#
+# Retrieval is "lazy": query the abstract index (all ~12k papers, no LLM cost), then deep
+# extract only the retrieved papers at cold-start. Fixes from the OpenADMET debugging are
+# active by default — mean-centered embeddings and a focused query, which together took
+# top-10 on-topic hits from 4/10 to 9/10 on that corpus.
+#
+# For this task the corpus is genuinely deep: text classification (hierarchical /
+# multilingual / applied / active-learning / adversarial) plus a large body of authorship,
+# style and small-data fine-tuning work.
+#
+# Prerequisites (once, on the dev pod):
+#   1. Dataset:  mlebench prepare -c spooky-author-identification --data-dir /workspace/data/mlebench
+#   2. Abstract index:
+#        cd /workspace/Agentic_Knowledge_Base && python scripts/6_build_abstract_index.py --venues all
+#   3. PDF extractor (WITHOUT --no-deps, so pymupdf comes along — this bit us before):
+#        source /workspace/MLEvolve/.venv/bin/activate && pip install pymupdf4llm
+#   4. Sanity-check retrieval before spending 12 h:
+#        python scripts/probe_retrieval.py \
+#          --task /workspace/data/mlebench/spooky-author-identification/prepared/public/description.md \
+#          --all --keywords text,classif,author,style,nlp,transformer,bert,few-shot
+#
+# Launch:
+#   kubectl delete job mlevolve-spooky-kb --ignore-not-found
+#   kubectl apply -f k8s/job-spooky-kb.yaml
+#   kubectl logs -f job/mlevolve-spooky-kb | grep -E "\[Lazy\]|\[best\] updated|Progress:"
+#
+# Verify in the first ~10 minutes that the KB actually fired:
+#   "[Lazy] extracted N/20 papers"  and  "technique rerank: ... -> K selected"  with K > 0.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-spooky-kb
+  labels:
+    app: mlevolve
+    experiment: spooky
+    variant: kb-on
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: spooky
+        variant: kb-on
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "spooky-author-identification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        # EXP_ID must stay the competition id (the grading server looks it up), so the run
+        # directory is differentiated via EXP_NAME instead: runs/<ts>_spooky-kb/.
+        - name: EXP_NAME
+          value: "spooky-kb"
+        - name: CPUS_PER_TASK
+          value: "4"
+        - name: SERVER_ID
+          value: "5"                # distinct from the baseline's 4
+        # The ONLY functional difference from the control arm.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to the control arm
+          requests:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi

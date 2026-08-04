@@ -57,8 +57,13 @@ format_time() {
 export TIME_LIMIT=$(format_time $TIME_LIMIT_SECS)
 export STEP_LIMIT=500
 
+# EXP_NAME labels the run directory. Defaults to EXP_ID; override it when running the same
+# competition under different conditions (e.g. an A/B on the knowledge base) so the runs
+# don't land in near-identical directories distinguishable only by timestamp.
+EXP_NAME="${EXP_NAME:-${EXP_ID}}"
+
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-CLOSEST_EXP_NAME="${TIMESTAMP}_${EXP_ID}"
+CLOSEST_EXP_NAME="${TIMESTAMP}_${EXP_NAME}"
 
 # ── HuggingFace cache (optional, point to a shared directory) ──
 # export HF_ENDPOINT=https://huggingface.co
@@ -83,7 +88,7 @@ CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-aft
   dataset_dir="${dataset_dir}" \
   data_dir="${DATA_DIR}" \
   desc_file="${DESC_FILE}" \
-  exp_name="${EXP_ID}" \
+  exp_name="${EXP_NAME}" \
   start_cpu_id="${start_cpu}" \
   cpu_number="${CPUS_PER_TASK}" \
   ${EXTRA_RUN_ARGS:-}
