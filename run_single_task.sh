@@ -28,10 +28,19 @@ else
     bash "$ROOT/launch_server.sh" "${SERVER_ID}"
 
     echo "Waiting for grading server on port ${GRADING_SERVER_PORT} ..."
+    # Probe with python, not curl: slim images (e.g. pytorch/pytorch runtime) often ship
+    # without curl, and the old check swallowed "command not found" into /dev/null — so it
+    # always timed out and reported the server as down while it was in fact serving fine.
     MAX_WAIT=30
     WAITED=0
     while [ $WAITED -lt $MAX_WAIT ]; do
-        if curl -s "http://127.0.0.1:${GRADING_SERVER_PORT}/health" > /dev/null 2>&1; then
+        if python - "$GRADING_SERVER_PORT" <<'PY' 2>/dev/null
+import socket, sys
+s = socket.socket()
+s.settimeout(1)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+PY
+        then
             echo "Grading server ready (port ${GRADING_SERVER_PORT})."
             break
         fi
@@ -39,7 +48,9 @@ else
         WAITED=$((WAITED + 1))
     done
     if [ $WAITED -ge $MAX_WAIT ]; then
-        echo "Warning: grading server may not be ready yet, proceeding anyway ..."
+        echo "Warning: grading server did not come up on port ${GRADING_SERVER_PORT}."
+        echo "         See grading_servers/grading_server_${SERVER_ID}.out for why."
+        echo "         Proceeding, but submissions will NOT be officially scored."
     fi
 fi
 
