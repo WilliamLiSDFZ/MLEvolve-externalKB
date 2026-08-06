@@ -1,0 +1,109 @@
+# jigsaw-toxic-comment-classification-challenge — TREATMENT arm (knowledge base ON).
+#
+# Paired with job-jigsaw-baseline.yaml. Only EXTRA_RUN_ARGS and the isolation identifiers
+# (job name, EXP_NAME, SERVER_ID) differ — image, resources, time budget and model are
+# identical so the comparison is clean.
+#
+# See job-jigsaw-baseline.yaml for the full rationale, the inverted metric direction, and the
+# one-time prerequisites. Read that file first.
+#
+# Retrieval is "lazy": query the abstract index (~12k papers, no LLM cost), then deep-extract
+# only the top candidates at cold-start. Two fixes found while debugging OpenADMET/spooky are
+# on by default — mean-centred embeddings (ML abstracts are strongly anisotropic; every vector
+# shares a large "this is an ML paper" component that swamps topic signal) and LLM query
+# distillation (embedding the raw description dilutes the query; on spooky this took top-10
+# on-topic hits from 3/10 to 9/10).
+#
+# ── Gate before spending 12 h: probe retrieval first ────────────────────────────────────
+# The probe runs the retrieval stage alone in seconds, no LLM extraction, no job:
+#
+#   cd /workspace/Agentic_Knowledge_Base
+#   python scripts/probe_retrieval.py \
+#     --task /workspace/data/mlebench/jigsaw-toxic-comment-classification-challenge/prepared/public/description.md \
+#     --all --keywords toxic,hate,abusive,offensive,comment,moderation,harmful,safety,content
+#
+# Require >= 8/10 on-topic with `center=on query=llm`, the same bar spooky cleared (9/10).
+# If it falls short, DO NOT LAUNCH — retrieval is the thing under test, and a diluted query
+# would make this run measure nothing. Fix the query first.
+#
+# Launch:
+#   kubectl delete job mlevolve-jigsaw-kb --ignore-not-found
+#   kubectl apply -f k8s/job-jigsaw-kb.yaml
+#   kubectl logs -f job/mlevolve-jigsaw-kb | grep -E "\[Lazy\]|\[best\] updated|Progress:"
+#
+# Verify in the first ~10 minutes that the KB actually fired — all three must appear:
+#   "[Lazy] distilled query"          (query distillation ran or hit cache)
+#   "[Lazy] ... extracting N"         (deep extraction happened, N > 0)
+#   "technique rerank: ... -> K selected"   with K > 0
+# If K is 0 the agent is running as an expensive baseline and the arm is worthless.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kb
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        # EXP_ID must stay the competition id (the grading server looks it up), so the run
+        # directory is differentiated via EXP_NAME instead: runs/<ts>_jigsaw-kb/.
+        - name: EXP_NAME
+          value: "jigsaw-kb"
+        - name: CPUS_PER_TASK
+          value: "8"                # keep in sync with the cpu limit below
+        - name: SERVER_ID
+          value: "7"                # port 5012; distinct from the baseline's 6
+        # The ONLY functional difference from the control arm.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to the control arm
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi           # tmpfs pages count against the container memory limit

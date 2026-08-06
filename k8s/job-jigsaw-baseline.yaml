@@ -1,0 +1,129 @@
+# jigsaw-toxic-comment-classification-challenge — CONTROL arm (knowledge base OFF).
+#
+# Paired with job-jigsaw-kb.yaml. Everything except the KB settings is identical, so any
+# difference in the final score is attributable to the knowledge base.
+#
+# Why this task: it is the best corpus match we have. Four Agentic_Knowledge_Base categories
+# are directly on-topic — acl-2024/hate-speech-and-toxic-content-detection (30 papers),
+# neurips-2024/toxicity-detection-and-classification-datasets (7),
+# naacl-2024/llm-alignment-safety-detoxification (66), and
+# aaai-2024/llm-safety-adversarial-robustness (287) — roughly 390 papers, versus the 3 of 423
+# categories that were relevant to OpenADMET (where the KB measurably HURT: baseline 0.678,
+# KB 0.741/0.726 on the real test set). If the KB still fails to help when the corpus does
+# cover the task, the problem is the injection mechanism or the paper/competition genre gap,
+# not coverage. Either outcome is a publishable result.
+#
+# ── Differences from the spooky experiment that matter ──────────────────────────────────
+#
+# METRIC DIRECTION IS INVERTED. spooky is multi-class log loss (lower better); this is the
+# mean column-wise ROC AUC over 6 independent binary labels (HIGHER better). The direction is
+# decided ONCE at startup by result_parse_agent via an LLM call. If it guesses wrong the whole
+# 12 h searches backwards. CHECK THIS IN THE FIRST 30 MINUTES:
+#     kubectl logs job/mlevolve-jigsaw-base | grep -iE "maximize|minimize|lower_is_better"
+# Kill and relaunch immediately if it says minimize.
+#
+# 8x THE DATA. 159,571 train comments vs spooky's 19,579. Each search step trains far more
+# slowly, so expect materially fewer candidate nodes in 12 h than spooky's 19. That is
+# inherent to the task, not a fault — but it means the KB effect here shows up as "are the
+# few steps well-chosen", not "is the search broader".
+#
+# MULTI-LABEL, NOT MULTI-CLASS. The 6 label columns are independent; rows do NOT sum to 1.
+# Verified safe: submission_fusion_utils.py::_detect_format decides row normalization from the
+# data (triggers only when |row_sum - 1| < 0.05 for all rows), so it will not wrongly
+# normalize these predictions the way it did — correctly — for spooky.
+#
+# RESOURCES RAISED to 48Gi / 8 CPU (spooky ran 32Gi / 4 CPU). 16Gi OOM-killed the spooky
+# baseline at 8h37m; with 8x the data and three parallel training subprocesses
+# (agent.search.parallel_search_num=3), headroom is cheaper than losing another 8 hours.
+# 8 CPUs help the char n-gram TF-IDF and tokenizer paths, which are CPU-bound on 160k docs.
+#
+# ── Prerequisites (once, on the dev pod) ────────────────────────────────────────────────
+#   1. Repair mle-bench. The pip-from-git install fetched LFS pointer files, so every bundled
+#      leaderboard.csv is a 130-byte stub — this is why the grading server never came up and
+#      why `mlebench grade-sample` died in rank_score:
+#        apt-get update && apt-get install -y git-lfs && git lfs install
+#        git clone https://github.com/openai/mle-bench.git /tmp/mle-bench
+#        cd /tmp/mle-bench && git lfs pull
+#        source /workspace/MLEvolve/.venv/bin/activate && pip install -e .
+#   2. Confirm the competition id (the HuggingFace name `google/jigsaw_toxicity_pred` is NOT it):
+#        python -c "from mlebench.registry import registry; \
+#          print([c for c in registry.list_competition_ids() if 'jigsaw' in c])"
+#   3. Dataset (needs Kaggle credentials and accepting the competition rules):
+#        mlebench prepare -c jigsaw-toxic-comment-classification-challenge \
+#          --data-dir /workspace/data/mlebench
+#   4. GPU quota: this makes three concurrent jobs. Check before applying, or the pods sit
+#      Pending: kubectl describe quota | grep -i gpu
+#
+# Launch:
+#   kubectl delete job mlevolve-jigsaw-base --ignore-not-found
+#   kubectl apply -f k8s/job-jigsaw-baseline.yaml
+#   kubectl logs -f job/mlevolve-jigsaw-base | grep -E "\[best\] updated|Progress:"
+#
+# Score afterwards (mlebench grade-sample is broken; see utils/grade_local.py):
+#   python utils/grade_local.py -c jigsaw-toxic-comment-classification-challenge \
+#     --data-dir /workspace/data/mlebench runs/<ts>_jigsaw-base/workspace/ensembles_csv/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-base
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-off
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800     # 13 h hard stop (12 h agent budget + overhead)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-off
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        # No DATA_DIR/DESC_FILE: fall back to the mle-bench convention
+        # <DATASET_DIR>/<EXP_ID>/prepared/public, which `mlebench prepare` creates.
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-base"
+        - name: CPUS_PER_TASK
+          value: "8"                # keep in sync with the cpu limit below
+        - name: SERVER_ID
+          value: "6"                # port 5011; spooky holds 4 and 5
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # Nautilus policy: requests == limits
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm               # torch DataLoader workers need >64Mi shared memory
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi           # tmpfs pages count against the container memory limit
