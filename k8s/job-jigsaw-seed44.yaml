@@ -1,0 +1,181 @@
+# jigsaw-toxic-comment-classification-challenge — REPEAT 3 of 3 (agent.seed=44).
+#
+# Both arms in one file so they are applied together and reviewed side by side: paired arms
+# must run concurrently, otherwise they land on different nodes under different cluster load
+# and the 12 h wall-clock budget stops meaning the same thing in each arm.
+#
+#   kubectl apply -f k8s/job-jigsaw-seed44.yaml     # launches BOTH (2 GPUs)
+#   kubectl delete -f k8s/job-jigsaw-seed44.yaml    # Job specs are immutable — delete first
+#
+# ── Why repeat at all ───────────────────────────────────────────────────────────────────
+# Repeat 1 (agent.seed=42, k8s/job-jigsaw-{baseline,kb}.yaml) gave, at matched K=1:
+#     baseline 0.97997 (below median)   vs   KB 0.98503 (above median)
+# — the KB's first positive result after two negatives (OpenADMET, spooky). It rests on a
+# single run of 5 candidate solutions, so it is not yet a finding. MLE-bench recommends >= 3
+# seeds; these two files supply repeats 2 and 3.
+#
+# ── What "seed" does and does not control ───────────────────────────────────────────────
+# `agent.seed` reaches utils/seed.py, which seeds `random` and `numpy` — NOT torch, and not
+# the LLM. Generated solution code trains in subprocesses with its own seeding, and the code
+# generator is a sampled LLM. So these are best described as three INDEPENDENT REPEATS whose
+# agent-side RNG differs, not as a controlled seed sweep. Re-running with an identical seed
+# would still diverge. Report them as repeats.
+#
+# ── Held identical to repeat 1 (do not "improve" these while the experiment is open) ─────
+#   image, 8 CPU / 48Gi / 1 GPU, activeDeadlineSeconds, dshm 2Gi, model, 12 h budget,
+#   and utils/submission_fusion_utils.py's max_total_time_hours = 9.0.
+# That last one truncated repeat 1's KB arm to a single ensemble. Raising it would give more
+# matched-K comparison points but would make repeat 1 non-poolable. Fusion is pure
+# post-processing, so the right fix is to re-run it offline across ALL repeats with one
+# consistent cap once the runs finish — no GPU needed:
+#   python utils/submission_fusion_utils.py --task_id jigsaw-toxic-comment-classification-challenge \
+#     --exp_name <ts>_<run>
+#
+# ── Scoring ─────────────────────────────────────────────────────────────────────────────
+#   python utils/grade_local.py -c jigsaw-toxic-comment-classification-challenge \
+#     --data-dir /workspace/data/mlebench runs/<ts>_jigsaw-base-s44/workspace/ensembles_csv/
+# Metric is mean column-wise ROC AUC — HIGHER is better (opposite of spooky's log loss).
+# Verify direction in the first 30 min:
+#   kubectl logs job/mlevolve-jigsaw-base-s44 | grep -iE "maximize|minimize"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-base-s44
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-off
+    repeat: "3"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-off
+        repeat: "3"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-base-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "10"               # port 5015; repeats 1-2 hold 6,7,8,9
+        - name: EXTRA_RUN_ARGS
+          value: "agent.seed=44"
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to repeat 1 and to the KB arm below
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi           # tmpfs pages count against the container memory limit
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kb-s44
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+    repeat: "3"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+        repeat: "3"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kb-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "11"               # port 5016
+        # Same seed as the control arm above; the KB flags are the ONLY functional difference.
+        # The distilled query is cached on disk by description hash, so every repeat and both
+        # arms retrieve with a byte-identical query.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=44
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
