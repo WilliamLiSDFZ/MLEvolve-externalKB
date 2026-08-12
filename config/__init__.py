@@ -113,7 +113,10 @@ class ColdstartConfig:
     use_coldstart: bool
     task_json_path: str
     model_json_path: str
-    description: str
+    description: str                        # pretrained-model guidance (runtime-populated)
+    methodology_text: str = ""              # literature techniques (runtime-populated)
+    inject_into_improve: bool = False       # also show techniques to improve_agent
+    improve_token_budget: int = 2000        # budget for that injection
 
 
 @dataclass

@@ -1,11 +1,19 @@
 """Build guidance description for agent from task/model JSON."""
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Dict, List, Any
 
+logger = logging.getLogger("MLEvolve")
+
 INIT_SOLUTION_JSON = Path(__file__).resolve().parent / "init_solution_paths.json"
 METHODOLOGY_MAP_JSON = Path(__file__).resolve().parent / "methodology_map.json"
+
+# Techniques are joined by this separator by every builder (methodology_agent._render,
+# ondemand._assemble / _assemble_techniques). Truncation cuts on it so a budget never
+# splits a technique mid-sentence.
+TECHNIQUE_SEPARATOR = "\n\n---\n\n"
 
 
 def _load_json(path: str) -> Dict:
@@ -113,8 +121,47 @@ def _build_methodology_text(task_name: str, methodology_kb_path: str) -> str:
     )
 
 
-def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
+def trim_methodology_text(text: str, token_budget: int) -> str:
+    """Trim assembled technique text to a token budget, cutting on technique boundaries.
 
+    The header is preserved and whole techniques are dropped from the end; a partial
+    technique is never emitted. Returns "" for empty input.
+    """
+    if not text or not text.strip():
+        return ""
+    budget_chars = max(1, int(token_budget)) * 4      # ~4 chars/token
+    if len(text) <= budget_chars:
+        return text
+
+    parts = text.split(TECHNIQUE_SEPARATOR)
+    kept, used = [], 0
+    for part in parts:
+        add = len(part) + (len(TECHNIQUE_SEPARATOR) if kept else 0)
+        if kept and used + add > budget_chars:
+            break
+        kept.append(part)
+        used += add
+    if len(kept) <= 1 and len(parts) > 1:
+        # The header block alone already exceeds the budget: keep header + first technique
+        # rather than returning a bare header with no content.
+        kept = parts[:2]
+    return TECHNIQUE_SEPARATOR.join(kept)
+
+
+def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
+    """Return the PRETRAINED-MODEL guidance, and stash literature techniques on the config.
+
+    The two used to be concatenated into one string. That was a mislabelling bug: draft_agent
+    renders this return value inside a block headed "Pretrained Model Strategy" whose
+    Option A is annotated "SOTA models with proven performance" and followed by "you MUST copy
+    the Code template EXACTLY". Appending paper-derived techniques there presented them to the
+    model as pretrained-model recommendations under an instruction that does not apply to them.
+
+    They are now kept apart: the return value is the model guidance only, and the retrieved
+    techniques go to `cfg.coldstart.methodology_text` for callers to render under their own
+    heading. Consumers: draft_agent (its own section) and, when
+    `coldstart.inject_into_improve` is set, improve_agent.
+    """
     tasks = _load_json(cfg.coldstart.task_json_path)
     models = _load_json(cfg.coldstart.model_json_path)
     text = _build_guidance_text(cfg.exp_id, tasks, models)
@@ -124,6 +171,8 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
 
     # Methodology / literature KB retrieval (opt-in: only when methodology_kb_path is set).
     # Mode: "vector" (semantic retrieval) | "llm" (category match) | "static" (methodology_map.json)
+    #     | "lazy" (abstract index + on-demand extraction)
+    methodology_text = ""
     methodology_kb_path = getattr(cfg, "methodology_kb_path", "") or ""
     if methodology_kb_path:
         mode = str(getattr(cfg, "methodology_retrieval", "vector")).lower()
@@ -132,7 +181,11 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
         else:
             from engine.coldstart.methodology_agent import build_methodology_guidance
             methodology_text = build_methodology_guidance(task_desc, methodology_kb_path, cfg)
-        if methodology_text:
-            text += methodology_text
+
+    try:
+        cfg.coldstart.methodology_text = methodology_text or ""
+    except Exception:  # pragma: no cover - config objects are OmegaConf/dataclass, both settable
+        logger.warning("could not store methodology_text on cfg.coldstart; "
+                       "literature techniques will not be injected")
 
     return text

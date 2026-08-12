@@ -1,0 +1,198 @@
+# jigsaw — two KB arms on the FIXED injection path, seed 42, run concurrently.
+#
+#   B  mlevolve-jigsaw-kbfix-s42   KB, prompt bug fixed, draft-stage injection only
+#   C  mlevolve-jigsaw-kbimp-s42   same as B, plus improvement-stage injection
+#
+#   kubectl apply  -f k8s/job-jigsaw-kbfix.yaml     # launches BOTH (2 GPUs)
+#   kubectl delete -f k8s/job-jigsaw-kbfix.yaml     # Job specs are immutable
+#
+# ── What changed since the earlier jigsaw runs ──────────────────────────────────────────
+# The retrieved techniques used to be string-concatenated onto the pretrained-model guidance,
+# so draft_agent rendered them INSIDE its "Pretrained Model Strategy → Option A [RECOMMENDED]"
+# block, between "Option A:" and the line "→ SOTA models with proven performance", and under a
+# "you MUST copy the Code template EXACTLY" instruction that cannot apply to prose. It also
+# broke the "None model" sentinel: when a competition has no pretrained-model entry,
+# _build_guidance_text returns exactly "None model" and draft_agent skips the whole block — but
+# the appended technique text made that comparison fail, so the block fired in the KB arm only.
+# The two arms therefore differed by an entire extra section of pretrained-model instructions,
+# not just by the knowledge. All six earlier jigsaw runs carried this.
+#
+# Now the two are kept apart: cfg.coldstart.description is model guidance only, and the
+# techniques go to cfg.coldstart.methodology_text under their own heading.
+#
+# ── What these two jobs can and cannot tell us ──────────────────────────────────────────
+# CAN:  B vs C is a clean paired comparison of improvement-stage injection. Both start
+#       together, on the same day, under the same cluster load, differing in one config flag.
+# CANNOT: B vs the old kb-42 run is a CROSS-RUN comparison. Run-to-run spread on this task is
+#       about 0.007 AUC — larger than any effect we are looking for — and `agent.seed` does not
+#       make runs reproducible (utils/seed.py seeds `random` and `numpy` only, not torch and
+#       not the LLM). So "did the fix help?" cannot be answered by one pair of runs. Treat any
+#       difference against the old run as directional at best.
+#
+# To get a real answer, add a concurrent control arm (baseline, no KB, seed 42) so the
+# comparison is A vs B vs C all started together. That needs a third GPU.
+#
+# ── Smoke check, within the first ~15 minutes ───────────────────────────────────────────
+#   # 1. guidance no longer carries the technique text (this is the bug fix)
+#   kubectl logs job/mlevolve-jigsaw-kbfix-s42 | grep "Guidance description" | head -c 600
+#        -> should NOT contain "Methodology Insights from Literature"
+#   # 2. retrieval fired
+#   kubectl logs job/mlevolve-jigsaw-kbfix-s42 | grep -E "\[Lazy\]|technique rerank"
+#        -> "technique rerank: N techniques from M papers -> K selected" with K > 0
+#   # 3. arm C only: improvement-stage injection actually happens
+#   kubectl logs job/mlevolve-jigsaw-kbimp-s42 | grep "injected .* literature techniques"
+#        -> should appear once per improve node; if absent, C is silently identical to B
+#   # 4. metric direction (jigsaw is AUC, higher better — opposite of spooky)
+#   kubectl logs job/mlevolve-jigsaw-kbfix-s42 | grep -iE "maximize|minimize"
+#
+# ── Scoring ─────────────────────────────────────────────────────────────────────────────
+#   python utils/grade_local.py -c jigsaw-toxic-comment-classification-challenge \
+#     --data-dir /workspace/data/mlebench runs/<ts>_jigsaw-kbfix-s42/workspace/ensembles_csv/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kbfix-s42
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+    arm: b-draft-only
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+        arm: b-draft-only
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kbfix-s42"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "12"               # port 5017; 6-11 are taken by the earlier jigsaw repeats
+        # seed 42 stated explicitly. The earlier runs used it too, but only as the config
+        # default, which is not self-documenting.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=42
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to every other jigsaw job
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi           # tmpfs pages count against the container memory limit
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kbimp-s42
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+    arm: c-draft-plus-improve
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+        arm: c-draft-plus-improve
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kbimp-s42"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "13"               # port 5018
+        # The ONLY difference from arm B: coldstart.inject_into_improve.
+        # Budget stays at the 2000-token default so this changes one variable, not two.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=42
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+            coldstart.inject_into_improve=True
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

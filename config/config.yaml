@@ -182,4 +182,19 @@ coldstart:
   use_coldstart: True                 # Cold-start KB enabled
   task_json_path: "engine/coldstart/competition_tag_classified.json"
   model_json_path: "engine/coldstart/models_guidance_classified.json"
-  description: ""
+  description: ""                     # runtime: pretrained-model guidance ONLY
+  # Runtime: literature techniques from the methodology KB, kept SEPARATE from
+  # `description`. They used to be appended to it, which meant draft_agent presented them
+  # inside its "Pretrained Model Strategy -> Option A [RECOMMENDED]" block, i.e. paper
+  # techniques were labelled as pretrained-model recommendations and inherited that block's
+  # "copy the Code template EXACTLY" instruction. Now each is rendered under its own heading.
+  methodology_text: ""
+  # Also show the retrieved techniques to improve_agent, not just at draft time.
+  # Rationale: the KB currently reaches only the 3 initial drafts out of 14-19 nodes per run,
+  # so its causal footprint is narrow; and improve_agent's plateau prompt already tells the
+  # model to "refer to the expert technique suggestions above" while nothing injects any.
+  # Default False: turning it on changes the KB arm, so it must be an explicit ablation.
+  inject_into_improve: False
+  improve_token_budget: 2000          # smaller than retr_token_budget (6000) used at draft:
+                                      # the improve prompt is already very long, and this text
+                                      # is repeated at EVERY improve node.

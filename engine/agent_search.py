@@ -62,6 +62,10 @@ class AgentSearch:
         self.branch_node_count: Dict[int, int] = {}
         self.use_coldstart = cfg.coldstart.use_coldstart
         self.coldstart_description = cfg.coldstart.description
+        # Literature techniques from the methodology KB, kept separate from the
+        # pretrained-model guidance above (see coldstart/knowledge.py). Empty unless
+        # methodology_kb_path is set.
+        self.methodology_text = getattr(cfg.coldstart, "methodology_text", "") or ""
 
         # Top-N candidates
         self.top_k = self.scfg.top_candidates_size

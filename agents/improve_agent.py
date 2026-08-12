@@ -22,6 +22,47 @@ from agents.coder.diff_coder import diff_generate_and_apply
 logger = logging.getLogger("MLEvolve")
 
 
+def _inject_methodology(agent, prompt: Any, parent_node: SearchNode) -> None:
+    """Add the retrieved literature techniques to the improve prompt, in place.
+
+    No-op unless coldstart.inject_into_improve is set and the KB returned something. Writing
+    into prompt["Instructions"] (rather than into the final string) is what makes this reach
+    BOTH generation paths: the full-rewrite path compiles that dict directly, and the diff
+    path passes the same dict to the planner, whose generate_initial_plan does
+    `prompt_base.copy()` and renders ["Instructions"]. `use_diff_mode` defaults to True, so
+    injecting only into the final string would have missed the path actually taken.
+    """
+    cs = getattr(agent.cfg, "coldstart", None)
+    if not (agent.use_coldstart and getattr(cs, "inject_into_improve", False)):
+        return
+
+    from engine.coldstart.knowledge import trim_methodology_text
+
+    text = trim_methodology_text(getattr(agent, "methodology_text", "") or "",
+                                 int(getattr(cs, "improve_token_budget", 2000)))
+    if not text.strip():
+        return
+
+    prompt["Instructions"] |= {
+        "Expert technique suggestions": [
+            "",
+            "Techniques retrieved from recent research papers as relevant to THIS task. "
+            "They are candidate improvements, not a checklist.",
+            "",
+            "- Pick at most ONE per improvement step, so the change stays atomic and its "
+            "effect is attributable.",
+            "- Skip any technique already tried in the Memory section above, and any you "
+            "cannot justify from this task's data and the previous run's output.",
+            "- Ignore all of them if your own diagnosis of the current solution points "
+            "elsewhere. A technique being published does not make it right for this dataset.",
+            "",
+            text,
+        ],
+    }
+    logger.info(f"[improve] injected {len(text)} chars of literature techniques "
+                f"for node {parent_node.id}")
+
+
 def run(agent, parent_node: SearchNode) -> SearchNode:
     improvement_standards = (
         "🎯 As a Grandmaster, make MEANINGFUL improvements that boost leaderboard performance.\n\n"
@@ -46,6 +87,19 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     prompt["Previous solution"] = {
         "Code": wrap_code(parent_node.code),
     }
+
+    # Literature techniques (opt-in via coldstart.inject_into_improve).
+    #
+    # Added FIRST so it renders above the strategy blocks below — the plateau branch already
+    # says "You can refer to the expert technique suggestions above", which until now was a
+    # dangling reference: nothing ever injected technique suggestions into this prompt. The
+    # KB reached only draft_agent, i.e. the 3 initial drafts out of 14-19 nodes per run.
+    #
+    # The budget is deliberately smaller than draft's (coldstart.improve_token_budget = 2000
+    # vs retr_token_budget = 6000): this prompt is already very long, and the text repeats at
+    # every improve node, where over-long context degrades adherence to the strict
+    # CHANGES/WHY/HOW output format required below.
+    _inject_methodology(agent, prompt, parent_node)
 
     success_patience, total_patience, branch_best_score = get_patience_counter(agent, parent_node)
     use_magnitude_prompt = (success_patience >= 2) or (total_patience >= 5)
