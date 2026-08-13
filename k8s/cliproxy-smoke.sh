@@ -143,11 +143,80 @@ pick = (CURRENT if CURRENT in names
         else next((m for m in names if m.startswith("gpt-5.6")),
                   next((m for m in names if m.startswith("gpt-5")), names[0])))
 if pick == CURRENT:
-    print(f"\n{CURRENT} works through the proxy — this is a drop-in swap, "
-          "no model_profiles.py change needed.")
+    print(f"\n{CURRENT} answers a plain request through the proxy.")
 else:
     print(f"\nNote: {CURRENT} (MLEvolve's current model) is NOT usable here; "
           f"nearest working alternative is {pick}.")
+
+# ── Does it accept what MLEvolve actually sends? ─────────────────────────────────────────
+# The sweep above used plain `max_tokens`, which every model accepted — the proxy evidently
+# normalises it. MLEvolve does NOT send that. llm/model_profiles.py inspects the model name
+# and, for a gpt-5* model, sends max_completion_tokens + reasoning_effort and omits
+# temperature entirely; result_parse_agent additionally uses function calling, and generate()
+# streams. Those three paths are what a real run depends on, so probe them directly rather
+# than inferring "drop-in" from a request shape the agent never makes.
+print(f"\n=== MLEvolve compatibility checks on {pick!r} ===")
+
+is_reasoning = any(pick.lower().startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
+tok_key = "max_completion_tokens" if is_reasoning else "max_tokens"
+compat_ok = True
+
+
+def compat(name, payload, stream=False):
+    global compat_ok
+    try:
+        if not stream:
+            r = call("/chat/completions", payload, timeout=180)
+            ch = (r.get("choices") or [{}])[0].get("message", {})
+            detail = f"content={str(ch.get('content'))[:40]!r}"
+            if ch.get("tool_calls"):
+                detail = f"tool_calls={ch['tool_calls'][0].get('function', {}).get('name')!r}"
+            print(f"  [OK  ] {name:<34} {detail}")
+        else:
+            req = urllib.request.Request(BASE + "/chat/completions",
+                                         data=json.dumps(payload).encode(),
+                                         headers=HDRS, method="POST")
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                chunks = sum(1 for ln in resp if ln.startswith(b"data:"))
+            print(f"  [OK  ] {name:<34} {chunks} SSE chunks")
+    except urllib.error.HTTPError as e:
+        body = e.read()[:220].decode(errors="replace")
+        print(f"  [FAIL] {name:<34} HTTP {e.code}: {body}")
+        compat_ok = False
+    except Exception as e:
+        print(f"  [FAIL] {name:<34} {type(e).__name__}: {e}")
+        compat_ok = False
+
+
+base_payload = {"model": pick, "messages": PROMPT, tok_key: 16}
+if is_reasoning:
+    base_payload["reasoning_effort"] = "high"      # what generate() sends
+else:
+    base_payload["temperature"] = 0
+compat(f"{tok_key} + reasoning_effort", base_payload)
+
+tools_payload = {
+    "model": pick, tok_key: 64,
+    "messages": [{"role": "user", "content": "Call submit_review with approved=true."}],
+    "tools": [{"type": "function", "function": {
+        "name": "submit_review", "description": "Submit a review verdict.",
+        "parameters": {"type": "object", "properties": {"approved": {"type": "boolean"}},
+                       "required": ["approved"]}}}],
+    "tool_choice": "auto",
+}
+if is_reasoning:
+    # query() drops effort to "none" when tools are present — /v1/chat/completions rejects
+    # the combination upstream. Verify the proxy behaves the same way.
+    tools_payload["reasoning_effort"] = "none"
+compat("function calling", tools_payload)
+
+compat("streaming", {**base_payload, "stream": True}, stream=True)
+
+if not compat_ok:
+    print(f"\nFAIL: {pick!r} answers plain requests but rejects what MLEvolve sends. "
+          "Fix llm/model_profiles.py for this model name before switching over.")
+    sys.exit(1)
+print(f"\nAll three paths work — {pick!r} is a genuine drop-in for MLEvolve.")
 print(f"\nPASS — proxy reachable, authenticated, {len(working)} models working.")
 print("\nTo point MLEvolve at it, set in the mlevolve-llm Secret:")
 print(f"    LLM_BASE_URL=http://<service>:{os.environ.get('PROXY_PORT','8317')}/v1")
