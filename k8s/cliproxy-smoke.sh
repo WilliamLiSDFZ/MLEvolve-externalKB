@@ -73,48 +73,85 @@ except Exception as e:
     print(f"FAIL: GET /v1/models -> {type(e).__name__}: {e}")
     sys.exit(1)
 
-print(f"{len(models)} models exposed:")
-for m in models[:25]:
-    print(f"    {m}")
-if len(models) > 25:
-    print(f"    ... and {len(models) - 25} more")
+print(f"{len(models)} models advertised by the proxy.")
 if not models:
     print("FAIL: proxy is up but exposes no models — check auth/ and config.yaml")
     sys.exit(1)
 
-# Prefer whatever the agent would actually use, else fall back to the first model offered.
+# The advertised list comes from a static models.json the proxy refreshes from GitHub, NOT
+# from what the linked account can actually call — so a name appearing here means nothing.
+# Probe each one. The inventory is the point of this test: it is what decides LLM_MODEL.
+SKIP = ("gpt-image", "codex-auto-review", "embedding", "whisper", "tts")
+candidates = [m for m in models if not any(s in m.lower() for s in SKIP)]
 want = os.environ.get("TEST_MODEL", "")
-target = want if want in models else next(
-    (m for m in models if any(k in m.lower() for k in ("sonnet", "opus", "gpt-5", "codex"))),
-    models[0])
-print(f"\ncalling chat/completions with model={target!r} ...")
+if want:                                   # test the named model first if one was given
+    candidates = [want] + [m for m in candidates if m != want]
 
-try:
-    r = call("/chat/completions", {
-        "model": target,
-        "messages": [{"role": "user",
-                      "content": "Reply with exactly the word: PROXY_OK"}],
-        "max_tokens": 16,
-    })
-except urllib.error.HTTPError as e:
-    body = e.read()[:600].decode(errors="replace")
-    print(f"FAIL: HTTP {e.code}: {body}")
-    if e.code == 400 and "max_tokens" in body:
-        print("  -> this model wants max_completion_tokens; MLEvolve handles that in "
-              "llm/model_profiles.py, but this smoke test does not.")
-    sys.exit(1)
-except Exception as e:
-    print(f"FAIL: {type(e).__name__}: {e}")
+PROMPT = [{"role": "user", "content": "Reply with exactly the word: PROXY_OK"}]
+
+
+def probe(model):
+    """Return (ok, note). Retries with max_completion_tokens if max_tokens is rejected."""
+    for tok_key in ("max_tokens", "max_completion_tokens"):
+        try:
+            r = call("/chat/completions",
+                     {"model": model, "messages": PROMPT, tok_key: 16}, timeout=120)
+            txt = (r.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            u = r.get("usage", {}) or {}
+            note = f"{tok_key}, {u.get('total_tokens', '?')} tok, reply {txt.strip()[:24]!r}"
+            return True, note
+        except urllib.error.HTTPError as e:
+            body = e.read()[:300].decode(errors="replace")
+            if e.code == 400 and "max_tokens" in body and tok_key == "max_tokens":
+                continue                    # this model wants max_completion_tokens
+            short = body.split('"message":')[-1][:110].strip(' "}')
+            return False, f"HTTP {e.code}: {short}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    return False, "rejected both max_tokens and max_completion_tokens"
+
+
+working, broken = [], []
+print(f"\nprobing {len(candidates)} chat models (image/review models skipped):\n")
+for m in candidates:
+    ok, note = probe(m)
+    print(f"  [{'OK  ' if ok else 'FAIL'}] {m:<32} {note}")
+    (working if ok else broken).append((m, note))
+
+print(f"\n{len(working)} of {len(candidates)} models usable by this account.")
+if not working:
+    print("FAIL: proxy is reachable and authenticated, but no advertised model can be "
+          "called. The account behind auth/ has access to none of them.")
     sys.exit(1)
 
-text = (r.get("choices") or [{}])[0].get("message", {}).get("content", "")
-usage = r.get("usage", {})
-print(f"reply : {text!r}")
-print(f"usage : {usage}")
-print(f"\nPASS — proxy reachable, authenticated, and completing with {target!r}")
+names = [m for m, _ in working]
+needs_mct = [m for m, n in working if "max_completion_tokens" in n]
+print("\nUSABLE MODELS:")
+for m, n in working:
+    print(f"    {m}")
+if needs_mct:
+    print("\nThese require max_completion_tokens rather than max_tokens:")
+    for m in needs_mct:
+        print(f"    {m}")
+    print("  -> llm/model_profiles.py chooses that by NAME PREFIX; check "
+          "_MAX_COMPLETION_TOKENS_PREFIXES covers them before switching MLEvolve over.")
+
+# Prefer the model MLEvolve already runs on: if it works through the proxy, switching over
+# is a Secret change and nothing else. Otherwise fall back to the same family, then anything.
+CURRENT = os.environ.get("LLM_MODEL_HINT", "gpt-5.6-terra")
+pick = (CURRENT if CURRENT in names
+        else next((m for m in names if m.startswith("gpt-5.6")),
+                  next((m for m in names if m.startswith("gpt-5")), names[0])))
+if pick == CURRENT:
+    print(f"\n{CURRENT} works through the proxy — this is a drop-in swap, "
+          "no model_profiles.py change needed.")
+else:
+    print(f"\nNote: {CURRENT} (MLEvolve's current model) is NOT usable here; "
+          f"nearest working alternative is {pick}.")
+print(f"\nPASS — proxy reachable, authenticated, {len(working)} models working.")
 print("\nTo point MLEvolve at it, set in the mlevolve-llm Secret:")
 print(f"    LLM_BASE_URL=http://<service>:{os.environ.get('PROXY_PORT','8317')}/v1")
-print(f"    LLM_MODEL={target}")
+print(f"    LLM_MODEL={pick}")
 print( "    LLM_API_KEY=<one of config.yaml's api-keys>")
 PY
 STATUS=$?

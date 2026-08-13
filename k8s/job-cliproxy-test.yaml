@@ -62,10 +62,10 @@ spec:
           value: "/workspace/cliproxy"
         - name: PROXY_PORT
           value: "8317"
-        # Optional: name the model MLEvolve would use, to test that exact one.
-        # Left unset, the script picks a sonnet/opus/gpt-5/codex model if the proxy offers one.
-        # - name: TEST_MODEL
-        #   value: "claude-sonnet-4-6"
+        # Probe MLEvolve's current model first, so the drop-in question is answered in the
+        # first few seconds of output rather than at the end of the sweep.
+        - name: TEST_MODEL
+          value: "gpt-5.6-terra"
         envFrom:
         - secretRef:
             name: cliproxy-key      # must provide CLIPROXY_API_KEY
