@@ -1,0 +1,85 @@
+# Smoke-test CLIProxyAPI (installed on the PVC at /workspace/cliproxy).
+#
+# Answers one question: can a Job pod — not the dev pod — start the proxy off the PVC,
+# authenticate, and get a completion back? Runs in a couple of minutes, no GPU, so it
+# schedules immediately even when the jigsaw jobs hold the GPU quota.
+#
+#   # 1. Put ONE of config.yaml's api-keys into a Secret. Never into a file in this repo:
+#   kubectl create secret generic cliproxy-key --from-literal=CLIPROXY_API_KEY='<key>'
+#
+#   # 2. Run it
+#   kubectl delete job mlevolve-cliproxy-test --ignore-not-found
+#   kubectl apply -f k8s/job-cliproxy-test.yaml
+#   kubectl logs -f job/mlevolve-cliproxy-test
+#
+# Job status IS the result: Complete = the proxy works from a Job, Failed = it does not.
+#
+# ── If it passes, wiring MLEvolve to it ─────────────────────────────────────────────────
+# The agent already reads its endpoint from the environment
+# (config.yaml: `base_url: ${oc.env:LLM_BASE_URL,...}`), so no code change is needed — update
+# the mlevolve-llm Secret with LLM_BASE_URL / LLM_MODEL / LLM_API_KEY. Two things to settle
+# first:
+#
+#   1. NETWORKING. This test starts its own proxy inside the pod because a Job cannot reach
+#      `localhost:8317` on the dev pod. For real runs, prefer ONE shared proxy behind a
+#      Service — expose the dev pod (or a small dedicated Deployment) and point jobs at
+#      http://<service>:8317/v1. A shared instance also means the upstream account's rate
+#      limit is accounted for in one place.
+#
+#   2. TOKEN REFRESH RACE. auth/*.json holds OAuth credentials that the proxy refreshes on a
+#      15-minute timer. Several proxy instances refreshing the same files concurrently can
+#      invalidate each other's tokens. That is the main argument against the
+#      one-proxy-per-job pattern this smoke test uses, and the reason to run exactly one
+#      instance once you move past testing.
+#
+# Also note MLEvolve sends per-model parameters (max_completion_tokens vs max_tokens,
+# reasoning_effort) chosen by llm/model_profiles.py from the MODEL NAME. If the proxy renames
+# models, add the proxy's names to the prefix lists there or the requests will 400.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-cliproxy-test
+  labels:
+    app: mlevolve
+    purpose: smoke-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900        # 15 min: it should take ~2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        purpose: smoke-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: cliproxy-test
+        image: python:3.11-slim     # tiny and fast to pull; the test needs only stdlib
+        command: ["bash", "/workspace/MLEvolve/k8s/cliproxy-smoke.sh"]
+        env:
+        - name: PROXY_DIR
+          value: "/workspace/cliproxy"
+        - name: PROXY_PORT
+          value: "8317"
+        # Optional: name the model MLEvolve would use, to test that exact one.
+        # Left unset, the script picks a sonnet/opus/gpt-5/codex model if the proxy offers one.
+        # - name: TEST_MODEL
+        #   value: "claude-sonnet-4-6"
+        envFrom:
+        - secretRef:
+            name: cliproxy-key      # must provide CLIPROXY_API_KEY
+        resources:                  # Nautilus policy: requests == limits. No GPU.
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol

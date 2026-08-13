@@ -21,6 +21,10 @@ from agents.coder.diff_coder import diff_generate_and_apply
 
 logger = logging.getLogger("MLEvolve")
 
+# Digest of the last literature block logged in full, so the preview is printed once per
+# distinct payload rather than at every improve node.
+_LAST_IMPROVE_DIGEST: str = ""
+
 
 def _inject_methodology(agent, prompt: Any, parent_node: SearchNode) -> None:
     """Add the retrieved literature techniques to the improve prompt, in place.
@@ -36,7 +40,8 @@ def _inject_methodology(agent, prompt: Any, parent_node: SearchNode) -> None:
     if not (agent.use_coldstart and getattr(cs, "inject_into_improve", False)):
         return
 
-    from engine.coldstart.knowledge import trim_methodology_text
+    from engine.coldstart.knowledge import (preview_text, text_digest,
+                                            trim_methodology_text)
 
     text = trim_methodology_text(getattr(agent, "methodology_text", "") or "",
                                  int(getattr(cs, "improve_token_budget", 2000)))
@@ -59,8 +64,18 @@ def _inject_methodology(agent, prompt: Any, parent_node: SearchNode) -> None:
             text,
         ],
     }
-    logger.info(f"[improve] injected {len(text)} chars of literature techniques "
-                f"for node {parent_node.id}")
+    # Injection is static, so the same text recurs at every improve node. Print the preview
+    # only when the content actually changes (tracked by digest), otherwise one line — enough
+    # to confirm the injection fired without repeating the body 10-15 times per run.
+    global _LAST_IMPROVE_DIGEST
+    digest = text_digest(text)
+    if digest != _LAST_IMPROVE_DIGEST:
+        _LAST_IMPROVE_DIGEST = digest
+        logger.info("[improve] node %s: injected %d chars of literature techniques, "
+                    "digest %s\n%s", parent_node.id, len(text), digest, preview_text(text))
+    else:
+        logger.info("[improve] node %s: injected %d chars, digest %s (unchanged)",
+                    parent_node.id, len(text), digest)
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:

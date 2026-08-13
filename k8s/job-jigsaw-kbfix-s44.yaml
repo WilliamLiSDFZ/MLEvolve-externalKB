@@ -1,0 +1,188 @@
+# jigsaw — B vs C, repeat 3 of 3 (agent.seed=44). Run the pair concurrently.
+#
+#   B  mlevolve-jigsaw-kbfix-s44   KB on, fixed injection, draft-stage only
+#   C  mlevolve-jigsaw-kbimp-s44   same as B, plus improvement-stage injection
+#
+#   kubectl apply  -f k8s/job-jigsaw-kbfix-s44.yaml
+#   kubectl delete -f k8s/job-jigsaw-kbfix-s44.yaml
+#
+# See k8s/job-jigsaw-kbfix.yaml (seed 42) for the full rationale and the description of the
+# injection bug these arms are the first to run without.
+#
+# ── Why repeat ──────────────────────────────────────────────────────────────────────────
+# Repeat 1 (seed 42) gave C − B = +0.0061 / +0.0052 / +0.0059 at K = 1 / 2 / 3, mean +0.0058,
+# consistent in sign across every matched K, and C took a silver medal where B took none.
+# That is the largest paired effect seen on this task so far — and it is also almost exactly
+# one standard deviation of the known run-to-run noise (sd ≈ 0.006 on the paired difference).
+# In the earlier three-repeat series a +0.0051 first repeat did not survive replication, so
+# consistency across K is not evidence: K values within a run are near-perfectly correlated.
+#
+# Two readings are indistinguishable at n = 1:
+#   (a) improvement-stage injection helps;
+#   (b) B simply drew a bad run — its 0.98005 is the second-lowest of the eight jigsaw runs
+#       to date, and C's 0.98618 sits inside the plain-baseline range (0.97997 – 0.98700),
+#       below two of the three baselines.
+# These two repeats decide between them.
+#
+# ── Secondary outcome worth recording ───────────────────────────────────────────────────
+# C produced 8 valid candidate solutions against B's 4. Candidate count is less dependent on
+# which single node got lucky than the final score is, so log it for each repeat alongside the
+# graded metric.
+#
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-jigsaw-kbfix-s44 | grep -E "Guidance description|technique rerank"
+#   kubectl logs job/mlevolve-jigsaw-kbimp-s44 | grep "injected .* literature techniques"
+# The second must appear, or C is silently identical to B. Once the logging change lands,
+# compare the `digest` in both arms — equal digests prove both retrieved the same knowledge.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kbfix-s44
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+    arm: b-draft-only
+    repeat: "3"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+        arm: b-draft-only
+        repeat: "3"
+    repeat: "3"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kbfix-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "16"               # port 5021
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=44
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:                 # identical to every other jigsaw job
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi           # tmpfs pages count against the container memory limit
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kbimp-s44
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    variant: kb-on
+    arm: c-draft-plus-improve
+    repeat: "3"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        variant: kb-on
+        arm: c-draft-plus-improve
+        repeat: "3"
+    repeat: "3"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kbimp-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "17"               # port 5022
+        # The ONLY difference from arm B: coldstart.inject_into_improve.
+        # Budget stays at the 2000-token default so this changes one variable, not two.
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=44
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+            coldstart.inject_into_improve=True
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm
+            optional: true
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

@@ -15,6 +15,50 @@ METHODOLOGY_MAP_JSON = Path(__file__).resolve().parent / "methodology_map.json"
 # splits a technique mid-sentence.
 TECHNIQUE_SEPARATOR = "\n\n---\n\n"
 
+LOG_PREVIEW_HEAD_LINES = 8      # the first 3 are the fixed section header, so this shows ~5
+LOG_PREVIEW_TAIL_LINES = 4
+LOG_PREVIEW_LINE_CHARS = 160    # technique bodies are prose paragraphs on one line
+
+
+def preview_text(text: str, head: int = LOG_PREVIEW_HEAD_LINES,
+                 tail: int = LOG_PREVIEW_TAIL_LINES,
+                 width: int = LOG_PREVIEW_LINE_CHARS) -> str:
+    """Render text as its first and last few non-blank lines, with an elision marker.
+
+    Logging the injected knowledge in full floods the run log with thousands of characters at
+    every call; logging only its length — which is what this module did after the guidance
+    split — makes it impossible to tell afterwards *which* techniques were selected, and that
+    is the one thing worth knowing when a run's results are being interpreted. Head plus tail
+    identifies the content and shows that it terminated cleanly, and the per-line cap keeps a
+    single prose paragraph from undoing the point of eliding.
+    """
+    if not text or not text.strip():
+        return "(empty)"
+
+    def _clip(ln: str) -> str:
+        return ln if len(ln) <= width else ln[:width] + " …"
+
+    lines = [_clip(ln) for ln in text.splitlines() if ln.strip()]
+    if len(lines) <= head + tail:
+        return "\n".join(lines)
+    omitted = len(lines) - head - tail
+    return "\n".join(
+        lines[:head]
+        + [f"    ... [{omitted} more lines, {len(text)} chars total] ..."]
+        + lines[-tail:]
+    )
+
+
+def text_digest(text: str) -> str:
+    """Short stable id for a block of injected text.
+
+    Lets two arms of a paired run be compared with `grep digest` — identical digests confirm
+    both arms retrieved the same knowledge, which the experiment design assumes but has so far
+    only been inferred from matching candidate counts.
+    """
+    import hashlib
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:8]
+
 
 def _load_json(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -187,5 +231,13 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
     except Exception:  # pragma: no cover - config objects are OmegaConf/dataclass, both settable
         logger.warning("could not store methodology_text on cfg.coldstart; "
                        "literature techniques will not be injected")
+
+    if methodology_text:
+        logger.info("Knowledge injected at draft: %d chars, digest %s\n%s",
+                    len(methodology_text), text_digest(methodology_text),
+                    preview_text(methodology_text))
+    elif methodology_kb_path:
+        logger.info("Knowledge injected at draft: NOTHING (kb path set but retrieval "
+                    "returned empty) — this arm is running as an expensive baseline")
 
     return text

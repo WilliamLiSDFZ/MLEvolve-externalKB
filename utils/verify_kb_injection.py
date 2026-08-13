@@ -181,6 +181,23 @@ def main() -> int:
     ok &= check("inject_into_improve defaults to False (running experiments unaffected)",
                 real.coldstart.inject_into_improve is False)
 
+    print("\n1e. the injected text is visible in the log, elided")
+    from engine.coldstart.knowledge import preview_text, text_digest
+
+    p = preview_text(meth)
+    ok &= check("preview is much shorter than the payload",
+                len(p) < len(meth) / 2, f"{len(meth)} -> {len(p)} chars")
+    ok &= check("preview keeps the first technique", MARKER in p.split("...")[0])
+    ok &= check("preview keeps the tail (shows it terminated)", MARKER in p.split("...")[-1])
+    ok &= check("preview states how much was elided", "more lines" in p)
+    ok &= check("short input is printed whole", preview_text("a\nb\nc") == "a\nb\nc")
+    ok &= check("empty input is labelled", preview_text("") == "(empty)")
+    ok &= check("digest is stable", text_digest(meth) == text_digest(meth))
+    ok &= check("digest distinguishes payloads", text_digest(meth) != text_digest(meth + "x"))
+    print("    --- preview as it will appear in the run log ---")
+    for ln in p.splitlines():
+        print(f"    | {ln[:96]}")
+
     print("\n2. draft_agent renders techniques under their own heading")
     agent = _fake_agent(meth, inject_into_improve=False)
     # Mirror draft_agent's Instructions assembly without importing it (that would pull in the
