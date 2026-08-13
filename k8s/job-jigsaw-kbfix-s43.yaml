@@ -56,7 +56,6 @@ spec:
         variant: kb-on
         arm: b-draft-only
         repeat: "2"
-    repeat: "2"
     spec:
       restartPolicy: Never
       containers:
@@ -131,7 +130,6 @@ spec:
         variant: kb-on
         arm: c-draft-plus-improve
         repeat: "2"
-    repeat: "2"
     spec:
       restartPolicy: Never
       containers:
