@@ -1,0 +1,98 @@
+# Rate-limit / sustained-load test for CLIProxyAPI.
+#
+# The smoke test (job-cliproxy-test.yaml) proved the proxy answers one-off requests and that
+# gpt-5.6-terra accepts MLEvolve's exact request shape. This one answers the question that
+# actually decides whether the proxy can replace the metered API: does it survive thousands of
+# large-prompt calls over hours, given that the proxy log shows `provider=codex` — a ChatGPT
+# subscription quota rather than pay-per-token API keys.
+#
+# No GPU, so it schedules immediately alongside the jigsaw jobs.
+#
+#   kubectl delete job mlevolve-cliproxy-loadtest --ignore-not-found
+#   kubectl apply -f k8s/job-cliproxy-loadtest.yaml
+#   kubectl logs -f job/mlevolve-cliproxy-loadtest
+#
+# Job status is the verdict: Complete = no limiting observed, Failed = limited or unstable.
+#
+# ── What it does ────────────────────────────────────────────────────────────────────────
+#   BURST  60 s at full 3-way concurrency, no pacing -> the instantaneous ceiling
+#   PACED  the remaining ~14 min at ~12 calls/min    -> sustained use
+#
+# 3 workers mirrors agent.search.parallel_search_num. 12 calls/min is roughly what a real run
+# sustains: nodes take minutes each and every node costs several calls (plan, code, review,
+# result parse). Running flat out for 15 minutes would be both unrepresentative and a good way
+# to burn the subscription quota this test is meant to measure.
+#
+# ── Cost ────────────────────────────────────────────────────────────────────────────────
+# Roughly 200 calls at ~3,000 input tokens = ~0.6 M tokens. That is real consumption against
+# the subscription. Raise DURATION_SECS only if the first run is inconclusive.
+#
+# ── Reading the output ──────────────────────────────────────────────────────────────────
+# The "errors by minute" table is the important one. Sporadic failures spread evenly are
+# upstream flakiness; failures that start at minute N and continue are a quota engaging —
+# that is the pattern that would waste a 12 h run.
+#
+# A clean result still does not prove a multi-hour run is safe. The decisive test is a 1 h
+# MLEvolve shakedown through the proxy (same job template, TIME_LIMIT_SECS=3600), which costs
+# one GPU-hour and exercises the real call mix.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-cliproxy-loadtest
+  labels:
+    app: mlevolve
+    purpose: load-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800       # 30 min ceiling for a ~15 min test
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        purpose: load-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: cliproxy-loadtest
+        image: python:3.11-slim
+        command: ["bash", "/workspace/MLEvolve/k8s/cliproxy-loadtest.sh"]
+        env:
+        - name: PROXY_DIR
+          value: "/workspace/cliproxy"
+        - name: PROXY_PORT
+          value: "8317"
+        - name: TEST_MODEL
+          value: "gpt-5.6-terra"     # the model MLEvolve would actually use
+        - name: DURATION_SECS
+          value: "900"               # 15 min
+        - name: BURST_SECS
+          value: "60"
+        - name: WORKERS
+          value: "3"                 # = agent.search.parallel_search_num
+        - name: PACED_CALLS_PER_MIN
+          value: "12"
+        - name: PROMPT_TOKENS
+          value: "3000"              # MLEvolve's improve prompts run larger than this
+        # Set this to test a SHARED proxy behind a Service rather than starting a local one.
+        # Preferred once you move past testing: several proxy instances refreshing the same
+        # auth/*.json OAuth tokens can invalidate each other.
+        # - name: PROXY_BASE_URL
+        #   value: "http://cliproxy:8317/v1"
+        envFrom:
+        - secretRef:
+            name: cliproxy-key       # must provide CLIPROXY_API_KEY
+        resources:                   # Nautilus policy: requests == limits. No GPU.
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
