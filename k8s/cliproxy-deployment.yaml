@@ -1,0 +1,84 @@
+# One shared CLIProxyAPI instance for every MLEvolve job to use.
+#
+# Why a Deployment rather than starting the proxy inside each job: auth/*.json holds OAuth
+# credentials that the proxy refreshes on a 15-minute timer. Two proxy processes refreshing the
+# same files concurrently can invalidate each other's tokens, which would take down a 12-hour
+# run partway. `replicas: 1` and `strategy: Recreate` guarantee exactly one writer.
+#
+#   kubectl apply -f k8s/cliproxy-deployment.yaml
+#   kubectl rollout status deploy/cliproxy
+#   kubectl logs -f deploy/cliproxy
+#
+# Jobs then reach it at  http://cliproxy:8317/v1  (in-namespace DNS).
+#
+# The binary, config.yaml and auth/ all live on the PVC at /workspace/cliproxy, so this
+# manifest carries no credentials. The api-keys clients must present are in that config.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cliproxy
+  labels:
+    app: cliproxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate        # never two instances refreshing auth/*.json at once
+  selector:
+    matchLabels:
+      app: cliproxy
+  template:
+    metadata:
+      labels:
+        app: cliproxy
+    spec:
+      containers:
+      - name: cliproxy
+        image: python:3.11-slim
+        workingDir: /workspace/cliproxy
+        command: ["bash", "-c"]
+        args:
+          - |
+            set -eu
+            chmod +x ./cli-proxy-api
+            exec ./cli-proxy-api --config config.yaml
+        ports:
+        - name: http
+          containerPort: 8317
+        readinessProbe:
+          tcpSocket:
+            port: 8317
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: 8317
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        resources:          # Nautilus policy: requests == limits
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cliproxy
+  labels:
+    app: cliproxy
+spec:
+  selector:
+    app: cliproxy
+  ports:
+  - name: http
+    port: 8317
+    targetPort: 8317
