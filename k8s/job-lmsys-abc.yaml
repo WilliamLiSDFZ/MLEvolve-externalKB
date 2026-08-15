@@ -17,18 +17,22 @@
 # categories (llm-evaluation-summarization-argumentation, web-data-quality-and-llm-evaluation,
 # llm-evaluation-summarization-opinion). Not incidental matches.
 #
-# It exists in this plan mainly as the CONTAMINATION-CLEAN COUNTERPART to
-# learning-agency-lab-automated-essay-scoring-2. The essay probe returned titles like "DREsS:
-# Dataset for Rubric-based Essay Scoring" and "EssayJudge: A Multi-Granular Benchmark" — AES
-# papers from 2024-2025 are plausibly built on this competition's data or its predecessors
-# (ASAP, Feedback Prize). If the KB helps there, a reviewer can reasonably say the literature
-# was about that exact dataset. Here the retrieved literature is about *evaluating LLM outputs
-# in general*, not about this Kaggle competition, so a positive result carries a claim the
-# essay result cannot support on its own.
+# It pairs with learning-agency-lab-automated-essay-scoring-2 as a partial contamination
+# control — PARTIAL, and the earlier claim that it was clean was too strong. The probe's top
+# hits here are "Chatbot Arena: An Open Platform for Evaluating LLMs by Human Preference"
+# (twice, ICML 2024 and 2025) and "LMSYS-Chat-1M": the papers describing the very platform and
+# dataset this competition is built from. The corpus is not innocent of this task.
 #
-# The competition is also from 2024, so the backbone is far less likely to have memorised it
-# than spooky (2017) or jigsaw (2018). Between them, essay and lmsys give a
-# high-coverage/possibly-contaminated case and a high-coverage/clean case.
+# The difference from essay is one of kind rather than presence. Those papers describe how the
+# data was collected and how Elo ratings are computed; they do not propose a method for
+# predicting an individual pairwise preference from response text. The AES papers retrieved for
+# essay — "DREsS: Dataset for Rubric-based Essay Scoring", "EssayJudge" — do propose scoring
+# methods, evaluated on essay data plausibly including this competition's or its predecessors'
+# (ASAP, Feedback Prize). So lmsys is cleaner in the "method tuned to this dataset" sense and
+# not in the "corpus knows about this data" sense. Report it that way; do not claim more.
+#
+# The competition is also from 2024, so the backbone is less likely to have memorised it than
+# spooky (2017) or jigsaw (2018).
 #
 # ── METRIC DIRECTION IS INVERTED relative to the essay experiment ───────────────────────
 # lmsys-chatbot-arena predicts which of two model responses a human preferred (or a tie) and is
@@ -42,12 +46,16 @@
 #   1. kubectl apply -f k8s/cliproxy-deployment.yaml && kubectl rollout status deploy/cliproxy
 #   2. kubectl create secret generic mlevolve-llm-proxy --from-literal=LLM_API_KEY='<key>'
 #   3. mlebench prepare -c lmsys-chatbot-arena --data-dir /workspace/data/mlebench
-#   4. Retrieval gate — >= 8/10 on-topic with center=on, query=llm, or do not launch:
-#        python scripts/probe_retrieval.py --task <desc>.md --all \
-#          --keywords preference,reward,rlhf,human-feedback,llm-eval,pairwise,judge,arena,\
-#                     alignment,chatbot,ranking
-#      Read the TITLES, not just the count: the count metric saturated at 10/10 on essay and
-#      could not discriminate between configurations there.
+#   4. Retrieval gate — >= 8/10 on-topic with center=on, query=llm, or do not launch.
+#      Use these keywords, and NOT hyphenated compounds:
+#        preference,reward,rlhf,feedback,eval,pairwise,judge,arena,chatbot,align,rank
+#      A first attempt used `llm-eval`, `human-feedback` and `alignment`. All three match zero
+#      titles in the corpus because they never appear verbatim, which deflated the count to
+#      7/10 and failed the gate on a task where retrieval was in fact excellent — the top hit
+#      was the Chatbot Arena paper itself. probe_retrieval.py now warns about keywords that
+#      match nothing, so this fails loudly rather than looking like a retrieval problem.
+#      Read the TITLES, not just the count: the count saturated at 10/10 on essay and could
+#      not discriminate between configurations there.
 #   5. WARM THE CACHES BEFORE LAUNCHING. This is a new task, so the query cache is cold and B
 #      and C would distil the query concurrently — two sampled LLM calls producing two
 #      DIFFERENT queries, racing on the same tmp path, leaving the arms retrieving different
