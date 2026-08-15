@@ -31,6 +31,16 @@ DATA=${DATASET_DIR:-/workspace/data/mlebench}
 GATE=${GATE:-8}                      # minimum on-topic hits in the top 10
 DESC="$DATA/$EXP_ID/prepared/public/description.md"
 
+# Phase 3 calls an LLM to extract techniques from PDFs, through cfg.agent.code — which reads
+# these from the environment. An interactive `kubectl exec` shell has none of them set, so
+# without this the config falls back to https://api.openai.com/v1 with an empty key and every
+# extraction dies with APIConnectionError after the retrieval work is already done.
+#
+# Default to the same shared proxy the jobs use: the cached extractions are then produced by
+# the same model that will consume them, rather than by whatever happened to be configured.
+export LLM_BASE_URL=${LLM_BASE_URL:-http://cliproxy:8317/v1}
+export LLM_MODEL=${LLM_MODEL:-gpt-5.6-terra}
+
 hr() { printf '%s\n' "────────────────────────────────────────────────────────────────"; }
 
 # ── 1. dataset ──────────────────────────────────────────────────────────────────────────
@@ -80,6 +90,47 @@ echo "  stops discriminating; whether the papers are actually usable is a judgem
 
 # ── 3. warm the caches ──────────────────────────────────────────────────────────────────
 hr; echo "3/3  WARM    query cache + on-demand extraction"; hr
+echo "LLM endpoint: $LLM_BASE_URL   model: $LLM_MODEL"
+
+# Preflight before the expensive part. Extraction downloads a PDF and makes an LLM call per
+# paper; if the endpoint is unreachable that is ~20 failures reported one line at a time, after
+# retrieval has already run. One 2-second call up front turns that into a clear error.
+if [ -z "${LLM_API_KEY:-}" ]; then
+    echo
+    echo "FAIL: LLM_API_KEY is not set in this shell. Export it before running:"
+    echo "    export LLM_API_KEY=\$(kubectl get secret mlevolve-llm-proxy \\"
+    echo "        -o jsonpath='{.data.LLM_API_KEY}' | base64 -d)   # from your laptop"
+    echo "  or paste it directly inside the pod."
+    exit 1
+fi
+if ! ( source "$REPO/.venv/bin/activate" && python - <<'PY'
+import json, os, sys, urllib.error, urllib.request
+base = os.environ["LLM_BASE_URL"].rstrip("/")
+req = urllib.request.Request(
+    base + "/chat/completions",
+    data=json.dumps({"model": os.environ["LLM_MODEL"],
+                     "messages": [{"role": "user", "content": "reply OK"}],
+                     "max_completion_tokens": 8}).encode(),
+    headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+             "Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=60) as r:
+        r.read()
+    print("  preflight: endpoint reachable and answering")
+except urllib.error.HTTPError as e:
+    print(f"  preflight FAILED: HTTP {e.code}: {e.read()[:300].decode(errors='replace')}")
+    sys.exit(1)
+except Exception as e:
+    print(f"  preflight FAILED: {type(e).__name__}: {e}")
+    print("  If this is a Service DNS name, is the proxy up?  kubectl get deploy cliproxy")
+    sys.exit(1)
+PY
+    ); then
+    echo
+    echo "FAIL: cannot reach $LLM_BASE_URL — not starting extraction."
+    exit 1
+fi
+
 OUT="/workspace/injected_${EXP_ID}.txt"
 (
     source "$REPO/.venv/bin/activate"
