@@ -148,9 +148,37 @@ cfg = OmegaConf.load("config/config.yaml")
 cfg.methodology_retrieval = "lazy"
 cfg.methodology_kb_path   = f"{akb}/methodology_kb"
 cfg.abstract_index_path   = f"{akb}/output/abstract_index"
-# extraction left at the default cap so the cache is genuinely populated
 
-text = build_lazy_guidance(Path(os.environ["DESC"]).read_text(encoding="utf-8"), cfg)
+# Lift the per-cold-start extraction cap for the duration of the warm-up. At its default of
+# 20 against a 40-paper candidate pool, one pass can only ever cache half the pool — which is
+# exactly what happened on lmsys: the warm-up reported success, then the run still logged
+# "40 candidates: 15 cached, 25 missing" and both KB arms went on to extract concurrently,
+# racing on the same *.md.tmp paths and producing two different technique sets. The cap
+# belongs in a real run, where it bounds cost; here the whole point is to leave nothing for
+# the arms to fetch.
+cfg.max_extractions_per_coldstart = int(cfg.get("lazy_pool", 40))
+
+# Repeat until nothing new lands. Some papers can never be extracted — AAAI records carry no
+# resolvable PDF URL at all — so a fixed number of passes cannot be the stopping rule. Those
+# permanently-missing papers are harmless: _extract_one returns before writing anything, so
+# both arms skip them identically.
+desc = Path(os.environ["DESC"]).read_text(encoding="utf-8")
+kb = Path(cfg.methodology_kb_path)
+count = lambda: len(list(kb.rglob("*_methodology.md")))
+
+text, prev = "", -1
+for attempt in range(1, 6):
+    before = count()
+    if before == prev:
+        break
+    prev = before
+    text = build_lazy_guidance(desc, cfg)
+    after = count()
+    print(f"  pass {attempt}: {before} -> {after} cached papers (+{after - before})")
+    if after == before:
+        print("  no further progress — the remaining candidates have no resolvable PDF")
+        break
+
 Path(os.environ["OUT"]).write_text(text, encoding="utf-8")
 print(f"\ninjected text: {len(text)} chars, digest {text_digest(text)}")
 print(f"saved to {os.environ['OUT']}")
@@ -164,8 +192,56 @@ hr
 QC="$AKB/output/query_cache"
 echo "query cache : $(ls "$QC" 2>/dev/null | wc -l) entries in $QC"
 echo "methodology : $(find "$AKB/methodology_kb" -name '*_methodology.md' 2>/dev/null | wc -l) extracted papers"
+
+# Verify rather than assert. Re-run retrieval with extraction disabled, which is exactly what
+# each arm will see at launch, and report the split. Saying "READY" without this is how the
+# lmsys run got to "15 cached, 25 missing" after a warm-up that reported success.
+hr; echo "VERIFY  (read-only replay of what each arm will see at launch)"; hr
+(
+    source "$REPO/.venv/bin/activate"
+    cd "$REPO"
+    DESC="$DESC" AKB="$AKB" python - <<'PY'
+import os, sys
+from pathlib import Path
+from omegaconf import OmegaConf
+sys.path.insert(0, os.environ.get("REPO_DIR", "/workspace/MLEvolve"))
+from engine.coldstart import ondemand as od
+from engine.coldstart.knowledge import text_digest
+
+akb = os.environ["AKB"]
+cfg = OmegaConf.load("config/config.yaml")
+cfg.methodology_retrieval = "lazy"
+cfg.methodology_kb_path   = f"{akb}/methodology_kb"
+cfg.abstract_index_path   = f"{akb}/output/abstract_index"
+cfg.max_extractions_per_coldstart = 0          # read-only: touch nothing
+
+desc = Path(os.environ["DESC"]).read_text(encoding="utf-8")
+retr = od._load_abstract_index(Path(cfg.abstract_index_path), cfg)
+query = od._build_query(desc, cfg)
+hits = retr.search(query, top_k=int(cfg.lazy_pool), alpha=float(cfg.retr_alpha))
+best = hits[0][1] or 1.0
+cands = [(r, s) for r, s in hits if (s / best) >= float(cfg.lazy_min_score)]
+cached, missing = od._split_cached(cands, Path(cfg.methodology_kb_path))
+
+print(f"  candidates {len(cands)}: {len(cached)} cached, {len(missing)} missing")
+text = od.build_lazy_guidance(desc, cfg)
+print(f"  injected   {len(text)} chars, digest {text_digest(text)}")
+if missing:
+    print(f"\n  {len(missing)} papers still have no extraction. Both KB arms will attempt "
+          f"them concurrently at launch:")
+    for rec, _ in missing[:8]:
+        print(f"      {rec.id}  pdf={'yes' if od._resolve_pdf(rec) else 'NO — unextractable'}")
+    if any(od._resolve_pdf(r) for r, _ in missing):
+        print("\n  NOT SAFE TO LAUNCH: at least one is extractable, so the arms would race on")
+        print("  it and could end up with different technique sets. Re-run this script.")
+        sys.exit(1)
+    print("\n  All unextractable (no resolvable PDF). Both arms will skip them identically")
+    print("  without writing anything — safe to launch.")
+PY
+) || exit 1
+
 hr
-echo "READY. Launch, then confirm in the first minutes of the run logs:"
-echo "    [Lazy] distilled query (cached)          <- not 'new, cached to ...'"
-echo "    [Lazy] 40 candidates: 40 cached, 0 missing"
-echo "    Knowledge injected at draft: ... digest <X>   <- same X in the B and C arms"
+echo "READY. In the first minutes of each run, confirm:"
+echo "    [Lazy] distilled query (cached)              <- not 'new, cached to ...'"
+echo "    [Lazy] N candidates: N cached, 0 missing     <- or only unextractable ones"
+echo "    Knowledge injected at draft: ... digest <X>  <- identical X in the B and C arms"
