@@ -1,0 +1,302 @@
+# lmsys-chatbot-arena — three-arm experiment, REPEAT 2 (seed 43), through the shared
+# CLIProxyAPI. All three run concurrently.
+#
+#   A  mlevolve-lmsys-base-s43    no knowledge base
+#   B  mlevolve-lmsys-kb-s43      KB on, draft-stage injection only
+#   C  mlevolve-lmsys-kbimp-s43   KB on, draft AND improve stages
+#
+#   kubectl apply  -f k8s/job-lmsys-abc-s43.yaml     # 3 GPUs
+#   kubectl delete -f k8s/job-lmsys-abc-s43.yaml
+#
+# See k8s/job-lmsys-abc.yaml (seed 42) for why this task was chosen and what each contrast
+# answers. This file records what repeat 1 showed and what a second seed can settle.
+#
+# ── What repeat 1 found: the task had no resolving power ────────────────────────────────
+# Graded, log loss, lower better. A uniform predictor (1/3, 1/3, 1/3) scores ln(3) = 1.09861.
+#
+#     K    A base      B kb      C kbimp    ordering
+#     1    1.02621     1.02788   1.03584    A < B < C   (baseline best)
+#     2    1.02362     1.02212   1.01788    C < B < A   (baseline worst)
+#
+# Three things make this uninterpretable as a comparison:
+#   * every arm lands within 5.7-7.3% of the trivial predictor, so none of them solved the
+#     task in twelve hours;
+#   * the ordering REVERSES between K=1 and K=2;
+#   * arm C alone moves 0.01796 between those two sizes — 1.9x the entire between-arm span
+#     at K=1. Within-arm variation exceeds between-arm variation.
+#
+# Compare the jigsaw B-vs-C series, where the sign held across 4/4, 4/5 and 5/5 matched sizes
+# within each repeat. That consistency was the evidence there; its absence is the evidence
+# here.
+#
+# ── What this repeat can and cannot settle ──────────────────────────────────────────────
+# CAN: whether repeat 1 was an unlucky draw. Two independent runs both landing near the
+# trivial predictor, with unstable orderings, would make "this task cannot discriminate at a
+# 12 h budget" a defensible statement rather than an n=1 impression.
+#
+# CANNOT: make the task tractable. The diagnosis is that twelve hours is not enough — 55k
+# paired long-form conversations, where a competitive approach means fine-tuning a
+# DeBERTa-scale model and a single training run costs hours. A second seed tests the same
+# budget again. If the goal is to find out whether the task becomes usable rather than to
+# confirm that it is not, raising TIME_LIMIT_SECS (and activeDeadlineSeconds with it) would be
+# the more informative spend of the same GPU hours.
+#
+# ── Cost warning ────────────────────────────────────────────────────────────────────────
+# Measured: ~63 M tokens per arm per 12 h run at 3,000-token prompts, and MLEvolve's real
+# prompts run larger. Three arms is ~190 M. Running this alongside an essay repeat is ~380 M
+# against the subscription that already hit a 97-hour cooldown once. Watch the plan's usage
+# percentage while these run, and stagger the two experiments if it climbs fast.
+#
+# ── Prerequisites ───────────────────────────────────────────────────────────────────────
+#   1. Proxy healthy and out of cooldown:  kubectl rollout status deploy/cliproxy
+#   2. Caches are already warm for this task from repeat 1, but verify — the check is cheap
+#      and it is what repeat 1 of essay lacked:
+#        KEY=$(kubectl get secret mlevolve-llm-proxy -o jsonpath='{.data.LLM_API_KEY}' | base64 -d)
+#        kubectl exec -it <dev-pod> -- bash -c "export LLM_API_KEY='$KEY'
+#          bash /workspace/MLEvolve/k8s/prepare-task.sh lmsys-chatbot-arena \
+#            preference,reward,rlhf,feedback,eval,pairwise,judge,arena,chatbot,align,rank"
+#      Launch only after it prints "safe to launch".
+#   3. python k8s/validate.py
+#
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   # log loss: LOWER is better. A 429 during this step once made the agent fall back to
+#   # maximize=True, which would search backwards for twelve hours.
+#   kubectl logs job/mlevolve-lmsys-base-s43 | grep -iE "maximize|minimize|lower_is_better"
+#   kubectl logs job/mlevolve-lmsys-kb-s43    | grep "Knowledge injected at draft"
+#   kubectl logs job/mlevolve-lmsys-kbimp-s43 | grep -E "Knowledge injected at draft|literature techniques"
+#   kubectl logs deploy/cliproxy --since=30m  | grep -cE " 429 | 5[0-9][0-9] "
+# The two draft digests must match, and the candidate line must show 0 extractable missing.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-lmsys-base-s43
+  labels:
+    app: mlevolve
+    experiment: lmsys
+    repeat: "2"
+    variant: kb-off
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: lmsys
+        repeat: "2"
+        variant: kb-off
+        arm: a-baseline
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "lmsys-chatbot-arena"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "lmsys-base-s43"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "27"               # port 5032
+        - name: EXTRA_RUN_ARGS
+          value: "agent.seed=43"
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-lmsys-kb-s43
+  labels:
+    app: mlevolve
+    experiment: lmsys
+    repeat: "2"
+    variant: kb-on
+    arm: b-draft-only
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: lmsys
+        repeat: "2"
+        variant: kb-on
+        arm: b-draft-only
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "lmsys-chatbot-arena"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "lmsys-kb-s43"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "28"               # port 5033
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=43
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-lmsys-kbimp-s43
+  labels:
+    app: mlevolve
+    experiment: lmsys
+    repeat: "2"
+    variant: kb-on
+    arm: c-draft-plus-improve
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: lmsys
+        repeat: "2"
+        variant: kb-on
+        arm: c-draft-plus-improve
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "lmsys-chatbot-arena"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "lmsys-kbimp-s43"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "29"               # port 5034
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=43
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+            coldstart.inject_into_improve=True
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
