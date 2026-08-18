@@ -13,6 +13,7 @@ Checks the three properties the coldstart split is supposed to guarantee:
 
 Run:  python utils/verify_kb_injection.py
 """
+import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,6 +170,66 @@ def main() -> int:
                 desc3 == "None model")
     ok &= check("but the techniques are still available separately",
                 MARKER in cfg3.coldstart.methodology_text)
+
+    print("\n1c-bis. the baseline arm is byte-identical to the pre-fix code")
+    # Why this matters for the experiments, not just for correctness:
+    #
+    # analyze_runs.py refuses to pool runs across the 2026-08-08 injection fix, because the KB
+    # arms genuinely changed. That leaves jigsaw's fixed-wiring groups with only arms B and C —
+    # there is no fixed-wiring BASELINE on jigsaw at all, and A-vs-B is the contrast the whole
+    # project is about. Three legacy baselines (2026-08-07/08/09) already exist.
+    #
+    # They are reusable if and only if the fix left arm A untouched. Arm A sets no
+    # methodology_kb_path, so it should take the same path through both versions — but "should"
+    # is what got us here, so this compares the ACTUAL pre-fix source pulled from git against
+    # the current one. If it ever fails, the legacy baselines must be dropped and re-run.
+    import subprocess
+    import tempfile
+
+    FIX_COMMIT = "651fbdc"          # feat(k8s): jigsaw KB arms on fixed injection path (B/C)
+    try:
+        old_src = subprocess.run(
+            ["git", "show", f"{FIX_COMMIT}^:engine/coldstart/knowledge.py"],
+            cwd=repo, capture_output=True, text=True, check=True).stdout
+    except Exception as e:
+        print(f"  [SKIP] cannot read pre-fix source from git ({e})")
+        old_src = None
+
+    if old_src:
+        with tempfile.TemporaryDirectory() as td:
+            old_path = Path(td) / "knowledge_legacy.py"
+            old_path.write_text(old_src)
+            spec = importlib.util.spec_from_file_location("knowledge_legacy", old_path)
+            legacy = importlib.util.module_from_spec(spec)
+            sys.modules["knowledge_legacy"] = legacy
+            spec.loader.exec_module(legacy)
+
+            def _baseline_cfg():
+                # Arm A exactly as the jobs configure it: coldstart on for pretrained-model
+                # guidance, no KB path. Fresh object per call — the new code mutates it.
+                return SimpleNamespace(
+                    exp_id="jigsaw-toxic-comment-classification-challenge",
+                    coldstart=SimpleNamespace(
+                        task_json_path=cfg.coldstart.task_json_path,
+                        model_json_path=cfg.coldstart.model_json_path,
+                        description="", methodology_text=""),
+                    methodology_kb_path="", torch_hub_dir="")
+
+            desc_old = legacy.build_guidance_description(_baseline_cfg(), task_desc="classify text")
+            desc_new = kn.build_guidance_description(_baseline_cfg(), task_desc="classify text")
+            ok &= check("arm A: guidance string identical across the fix",
+                        desc_old == desc_new,
+                        f"{len(desc_old)} vs {len(desc_new)} chars")
+
+            # The other half of arm A's prompt: draft_agent's new technique section is gated on
+            # a non-empty methodology_text, so it must not fire for the baseline. Reproduce the
+            # gate rather than importing draft_agent (which pulls in the LLM clients).
+            baseline_agent = _fake_agent("", inject_into_improve=False)
+            gate_fires = bool(baseline_agent.use_coldstart
+                              and (getattr(baseline_agent, "methodology_text", "") or "").strip())
+            ok &= check("arm A: draft_agent technique section does not fire", not gate_fires)
+            ok &= check("=> the three legacy jigsaw baselines are reusable as fixed baselines",
+                        desc_old == desc_new and not gate_fires)
 
     print("\n1d. the real OmegaConf config accepts the new fields")
     from omegaconf import OmegaConf

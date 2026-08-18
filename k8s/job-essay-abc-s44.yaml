@@ -1,0 +1,305 @@
+# learning-agency-lab-automated-essay-scoring-2 — three-arm experiment, REPEAT 3 (seed 44),
+# through the shared CLIProxyAPI. All three run concurrently.
+#
+#   A  mlevolve-essay-base-s44    no knowledge base
+#   B  mlevolve-essay-kb-s44      KB on, draft-stage injection only
+#   C  mlevolve-essay-kbimp-s44   KB on, draft AND improve stages
+#
+#   kubectl apply  -f k8s/job-essay-abc-s44.yaml     # 3 GPUs
+#   kubectl delete -f k8s/job-essay-abc-s44.yaml
+#
+# See job-essay-abc.yaml (seed 42) for why this task was chosen; job-essay-abc-s43.yaml for what
+# repeat 2 was meant to settle. This file records what the graded results now say and what a
+# third repeat can and cannot add.
+#
+# ── READ THIS BEFORE SPENDING 36 GPU-HOURS ──────────────────────────────────────────────
+# Graded against mle-bench private answers at matched K=1, all three draws so far:
+#
+#     draw                        A         B         C       B-A
+#     s42 (2026-08-14)      0.78021   0.83909   0.83184   +0.0589
+#     s43 draw 1 (08-16)    0.84268   0.82709   0.79925   -0.0156
+#     s43 draw 2 (08-17)    0.82216   0.83332   0.83243   +0.0112
+#
+#     B-A: mean +0.018, sd 0.038, t(2) = 0.83, signs + - +
+#
+# Two facts make this task a poor investment:
+#
+# 1. `agent.seed` does NOT pin the run. It seeds numpy/torch inside the generated candidate
+#    code; it does not seed the agent's search, because the LLM is sampled and gpt-5.6-terra is
+#    a reasoning model with no deterministic mode. The two "s43" runs above are the proof: same
+#    seed, same code, and B-A flips sign. So a new seed number buys an independent draw, not a
+#    replication — and s43 could have been re-run to identical effect.
+#
+# 2. The BASELINE's own variance swamps the effect. Arm A across the three draws is 0.780 /
+#    0.843 / 0.822 — sd 0.032, range 0.062. The whole medal ladder on this competition spans
+#    about 0.010 QWK (observed: gold >= ~0.8376, above-median ~0.833, below ~0.827), so arm A
+#    alone wanders across every medal tier. Reporting a medal change on this task is reporting
+#    noise.
+#
+# Required repeats at 80% power, from the observed paired sd:
+#
+#     to detect        essay (sd 0.038)        jigsaw (sd 0.0045)
+#     0.010 QWK/AUC    114 pairs / 2700 GPU-h    2 pairs /  39 GPU-h
+#     0.005            455 pairs / 10900 GPU-h    7 pairs / 158 GPU-h
+#
+# essay is not underpowered by a factor that a few more runs will close; it is the wrong
+# instrument. Likely causes: QWK on integer scores (a handful of essays rounding differently
+# moves the metric), and vote fusion that frequently leaves K=1/2/3 scoring identically, so
+# ensembling adds no averaging.
+#
+# What this third repeat is therefore FOR — and it is worth stating in the writeup either way:
+# it takes n from 3 to 4 on a contrast whose confidence interval will still comfortably contain
+# zero. Launch it if you want the fourth point for an honest "high-variance task, no detectable
+# effect" figure. Do NOT launch it expecting significance. If the 36 GPU-hours are contested,
+# jigsaw repeats 4-7 are the better spend: same cost buys a decisive answer there.
+#
+# ── correction to an earlier note ───────────────────────────────────────────────────────
+# The s43 draw-1 group was previously described as scrapped for rate limiting. It was not. That
+# came from a measurement bug in the analysis script: the regex `\b429\b` also matches the
+# millisecond field of a log timestamp, so `[... 07:09:06,429] WARNING: Node ... marked as buggy`
+# was counted as a rate limit. The real first 429 in those arms landed at 9.2 h / 9.7 h / 10.2 h
+# of a 12 h budget, a spread of 8 percentage points, and analyze_runs.py now rates the group
+# usable. It is a valid draw, and it is the one that contradicts draw 2.
+#
+# ── before launching ────────────────────────────────────────────────────────────────────
+# The paper cache is already warm from s42/s43 and the KB has not changed, so prepare-task.sh
+# does not need re-running for this competition. Confirm rather than assume:
+#
+#   kubectl logs job/mlevolve-essay-kb-s44 | grep -E "cached, .* missing|injected at draft"
+#
+# The candidate line must read "N cached, 0 missing" (or list only known-unextractable papers),
+# and the draft digests of B and C must match — if they differ, the two KB arms are holding
+# different technique sets and B-vs-C is uninterpretable, which is exactly what invalidated s42.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-essay-base-s44
+  labels:
+    app: mlevolve
+    experiment: essay
+    repeat: "3"
+    variant: kb-off
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: essay
+        repeat: "3"
+        variant: kb-off
+        arm: a-baseline
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "learning-agency-lab-automated-essay-scoring-2"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "essay-base-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "30"               # port 5035
+        - name: EXTRA_RUN_ARGS
+          value: "agent.seed=44"
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-essay-kb-s44
+  labels:
+    app: mlevolve
+    experiment: essay
+    repeat: "3"
+    variant: kb-on
+    arm: b-draft-only
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: essay
+        repeat: "3"
+        variant: kb-on
+        arm: b-draft-only
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "learning-agency-lab-automated-essay-scoring-2"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "essay-kb-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "31"               # port 5036
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=44
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-essay-kbimp-s44
+  labels:
+    app: mlevolve
+    experiment: essay
+    repeat: "3"
+    variant: kb-on
+    arm: c-draft-plus-improve
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: essay
+        repeat: "3"
+        variant: kb-on
+        arm: c-draft-plus-improve
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "learning-agency-lab-automated-essay-scoring-2"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "essay-kbimp-s44"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "32"               # port 5037
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=44
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+            coldstart.inject_into_improve=True
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
