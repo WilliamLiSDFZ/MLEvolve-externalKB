@@ -41,10 +41,19 @@ ARM_SUFFIXES = ("-kbimp", "-kbfix", "-kb", "-base")
 
 class _TagIgnoringLoader(yaml.SafeLoader):
     """config.yaml embeds !!python/object/apply:pathlib.PosixPath, which SafeLoader rejects and
-    unsafe_load would execute. Map unknown tags to None."""
+    unsafe_load would execute."""
 
 
-_TagIgnoringLoader.add_multi_constructor("", lambda loader, suffix, node: None)
+def _reconstruct(loader, suffix, node):
+    """Rebuild pathlib paths; map every other unknown tag to None. Mapping everything to None is
+    lossy in a way that bites later — see the comment in utils/dump_injected.py."""
+    if "pathlib" in suffix and isinstance(node, yaml.SequenceNode):
+        parts = [str(p) for p in loader.construct_sequence(node)]
+        return str(Path(*parts)) if parts else None
+    return None
+
+
+_TagIgnoringLoader.add_multi_constructor("", _reconstruct)
 
 
 def _competition_of(run_dir: Path) -> str:

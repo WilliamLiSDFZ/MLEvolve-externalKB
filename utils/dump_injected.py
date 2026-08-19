@@ -36,10 +36,26 @@ LOG_DIGEST = re.compile(r"Knowledge injected at draft: (\d+) chars, digest ([0-9
 
 
 class _TagIgnoringLoader(yaml.SafeLoader):
-    """config.yaml embeds !!python/object/apply:pathlib.PosixPath."""
+    """config.yaml embeds `!!python/object/apply:pathlib.PosixPath`, which SafeLoader rejects and
+    unsafe_load would execute."""
 
 
-_TagIgnoringLoader.add_multi_constructor("", lambda loader, suffix, node: None)
+def _reconstruct(loader, suffix, node):
+    """Rebuild pathlib paths; map every other unknown tag to None.
+
+    Mapping *everything* to None is the obvious implementation and it silently destroyed the
+    field this script depends on: `desc_file` is stored as a tagged sequence of path components,
+    so it became None, `Path(str(None or ""))` became `Path('.')`, and `.exists()` is true for
+    '.', so every run failed with `IsADirectoryError: Is a directory: '.'`. Reconstructing the
+    path is both correct and cheaper than the failure it prevents.
+    """
+    if "pathlib" in suffix and isinstance(node, yaml.SequenceNode):
+        parts = [str(p) for p in loader.construct_sequence(node)]
+        return str(Path(*parts)) if parts else None
+    return None
+
+
+_TagIgnoringLoader.add_multi_constructor("", _reconstruct)
 
 
 def logged_digest(run: Path) -> tuple[int, str] | None:
@@ -81,12 +97,15 @@ def main() -> int:
         try:
             raw = yaml.load(cfg_path.read_text(errors="replace"), Loader=_TagIgnoringLoader) or {}
             cfg = OmegaConf.create(raw)
-            desc = Path(str(cfg.get("desc_file") or ""))
-            task_desc = desc.read_text(errors="replace") if desc.exists() else ""
-            if not task_desc:
-                print(f"{run.name:<44}{want_digest:>16}{'-':>16}  SKIP: task description gone")
+            desc_str = str(cfg.get("desc_file") or "").strip()
+            # is_file(), not exists(): Path("") is Path('.'), and '.' exists.
+            desc = Path(desc_str) if desc_str else None
+            if desc is None or not desc.is_file():
+                print(f"{run.name:<44}{want_digest:>16}{'-':>16}  "
+                      f"SKIP: description not readable ({desc_str or 'desc_file unset'})")
                 skipped += 1
                 continue
+            task_desc = desc.read_text(errors="replace")
             # Cache-only: never pay for extraction or a new distillation during a replay.
             cfg.max_extractions_per_coldstart = 0
             cfg.coldstart.methodology_text = ""
