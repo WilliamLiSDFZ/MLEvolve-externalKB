@@ -236,6 +236,17 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
         logger.info("Knowledge injected at draft: %d chars, digest %s\n%s",
                     len(methodology_text), text_digest(methodology_text),
                     preview_text(methodology_text))
+        # Also dump the FULL text next to the journal. The log preview is elided to keep the
+        # log readable, which means a finished run does not record what knowledge it actually
+        # received — and without that, "did the agent use the retrieved techniques?" cannot be
+        # answered afterwards from the run directory alone. It is a few KB, write-only, and it
+        # makes every run self-documenting. Failure here must never affect the run.
+        try:
+            log_dir = Path(getattr(cfg, "log_dir", "") or ".")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "injected_knowledge.md").write_text(methodology_text, encoding="utf-8")
+        except Exception as e:  # pragma: no cover - diagnostics must not break a 12 h run
+            logger.warning("could not write injected_knowledge.md: %s", e)
     elif methodology_kb_path:
         logger.info("Knowledge injected at draft: NOTHING (kb path set but retrieval "
                     "returned empty) — this arm is running as an expensive baseline")
