@@ -86,12 +86,25 @@ def main() -> int:
     for run in sorted(p for p in root.iterdir() if p.is_dir()):
         if args.only and args.only not in run.name:
             continue
-        if (run / "logs" / "injected_knowledge.md").exists():
-            continue
         want = logged_digest(run)
         if not want:
             continue                       # not a KB arm, or never logged an injection
         want_chars, want_digest = want
+        target = run / "logs" / "injected_knowledge.md"
+
+        # Verify anything already on disk instead of trusting it. A file can be present and
+        # WRONG: build_guidance_description writes this file as a side effect, so an earlier
+        # report-only pass of this script deposited today's retrieval into every replayed run,
+        # including the one whose digest does not match. Re-check, and delete what fails.
+        if target.exists():
+            have = text_digest(target.read_text(errors="replace"))
+            if have == want_digest:
+                ok += 1
+                print(f"{run.name:<44}{want_digest:>16}{have:>16}  already present, verified")
+                continue
+            target.unlink()
+            print(f"{run.name:<44}{want_digest:>16}{have:>16}  "
+                  f"REMOVED: on-disk file is not what this run received")
 
         cfg_path = run / "logs" / "config.yaml"
         try:
@@ -116,24 +129,28 @@ def main() -> int:
             skipped += 1
             continue
 
+        # build_guidance_description has ALREADY written target as a side effect. Keeping it is
+        # the exception, not the default: only a verified match, and only when asked.
         got_digest = text_digest(got)
-        if got_digest == want_digest and len(got) == want_chars:
+        verified = got_digest == want_digest and len(got) == want_chars
+        keep = verified and args.write
+        if target.exists() and not keep:
+            target.unlink()
+
+        if verified:
             ok += 1
-            note = "MATCH"
-            if args.write:
-                (run / "logs" / "injected_knowledge.md").write_text(got, encoding="utf-8")
-                note = "MATCH -> written"
-            print(f"{run.name:<44}{want_digest:>16}{got_digest:>16}  {note}")
+            print(f"{run.name:<44}{want_digest:>16}{got_digest:>16}  "
+                  f"{'MATCH -> written' if keep else 'MATCH (not written; pass --write)'}")
         else:
             mismatch += 1
             print(f"{run.name:<44}{want_digest:>16}{got_digest:>16}  "
                   f"MISMATCH ({want_chars} vs {len(got)} chars) — KB moved, not recoverable")
 
     print(f"\n{ok} recovered, {mismatch} unrecoverable, {skipped} skipped")
-    if mismatch and args.write:
-        print("Mismatched runs were deliberately NOT written. Report them as unmeasurable;\n"
-              "substituting today's retrieval would score nodes against techniques the run\n"
-              "never received.")
+    if mismatch:
+        print("Mismatched runs were NOT written, and any stale file left by an earlier pass was\n"
+              "deleted. Report them as unmeasurable: substituting today's retrieval would score\n"
+              "nodes against techniques the run never received.")
     if not args.write and ok:
         print("Re-run with --write to save the recovered files.")
     return 0
