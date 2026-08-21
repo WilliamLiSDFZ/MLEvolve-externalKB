@@ -117,11 +117,14 @@ def main() -> int:
     for run in run_dirs:
         if args.only and args.only not in run.name:
             continue
-        ens_dir = run / "workspace" / "ensembles_csv"
-        files = sorted(ens_dir.glob("*.csv")) if ens_dir.is_dir() else []
-        if not files:
+        # Both fusion variants, tagged. `ensembles_uncapped/` is produced by utils/refuse_all.py
+        # with the 9 h serial-time cap lifted; the capped originals are kept so the two can be
+        # compared instead of one silently replacing the other.
+        variants = [("capped", run / "workspace" / "ensembles_csv"),
+                    ("uncapped", run / "workspace" / "ensembles_uncapped")]
+        work = [(v, f) for v, d in variants if d.is_dir() for f in sorted(d.glob("*.csv"))]
+        if not work:
             continue
-
         comp_id = _competition_of(run)
         if not comp_id:
             print(f"[skip] {run.name}: cannot determine competition (no config.yaml)",
@@ -148,9 +151,9 @@ def main() -> int:
             continue
         comp, answers, lb, lower = cache[comp_id]
 
-        for f in files:
+        for variant, f in work:
             m = ENS_RE.search(f.name)
-            row = {"run": run.name, "competition": comp_id,
+            row = {"run": run.name, "competition": comp_id, "variant": variant,
                    "k": int(m.group(1)) if m else 0,
                    "cum_hours": float(m.group(2)) if m else "",
                    "score": "", "medal": "",
@@ -172,15 +175,16 @@ def main() -> int:
                 except Exception:
                     pass
             rows.append(row)
-        print(f"[ok  ] {run.name}: {len(files)} ensemble(s), {comp_id}")
+        n_cap = sum(1 for v, _ in work if v == "capped")
+        print(f"[ok  ] {run.name}: {n_cap} capped + {len(work) - n_cap} uncapped, {comp_id}")
 
     if not rows:
         sys.exit("nothing graded — check --runs and --data-dir")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["run", "competition", "k", "cum_hours", "score",
-                                           "medal", "lower_better", "file", "note"])
+        w = csv.DictWriter(fh, fieldnames=["run", "competition", "variant", "k", "cum_hours",
+                                           "score", "medal", "lower_better", "file", "note"])
         w.writeheader()
         w.writerows(rows)
 

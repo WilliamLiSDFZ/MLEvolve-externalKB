@@ -315,6 +315,16 @@ def get_weights(metrics: List[float], maximize_flags: List[bool],
 
 def ensemble(args):
     cfg = EnsembleConfig()
+    # Optional overrides. Defaults are None so an unmodified call behaves exactly as before —
+    # these exist so the fusion can be replayed with the time cap lifted into a SEPARATE output
+    # directory, leaving the original capped results untouched for comparison.
+    if getattr(args, "max_total_hours", None) is not None:
+        cfg.max_total_time_hours = float(args.max_total_hours)
+    if getattr(args, "max_candidates", None) is not None:
+        cfg.max_candidates = int(args.max_candidates)
+        cfg.ensemble_sizes = [k for k in range(1, cfg.max_candidates + 1)]
+    out_subdir = getattr(args, "out_subdir", None) or "ensembles_csv"
+
     exp_name = get_closest_run_dir(args.runs_root, args.exp_name)
     if exp_name is None:
         raise FileNotFoundError(f"No matching run directory found for exp_name={args.exp_name}")
@@ -355,13 +365,13 @@ def ensemble(args):
     # ── 2. Skip Detection & Segmentation tasks ──
     if is_structured_output_task(args.task_id, args.tag_path):
         print(f"[SKIP] '{args.task_id}' is Detection/Segmentation, using top1 only.")
-        _copy_top1_as_ensemble(base_dir)
+        _copy_top1_as_ensemble(base_dir, out_subdir)
         return
 
     # ── 2b. Skip tasks where ensemble is known to hurt ──
     if args.task_id in ENSEMBLE_SKIP_TASKS:
         print(f"[SKIP] '{args.task_id}' is in ensemble skip list, using top1 only.")
-        _copy_top1_as_ensemble(base_dir)
+        _copy_top1_as_ensemble(base_dir, out_subdir)
         return
 
     # ── 3. Auto-detect format from first submission ──
@@ -400,7 +410,7 @@ def ensemble(args):
     n_valid = len(all_dirs)
     if n_valid == 0:
         print(f"[WARN] No valid candidates after filter. Falling back to top1 only.")
-        _copy_top1_as_ensemble(base_dir)
+        _copy_top1_as_ensemble(base_dir, out_subdir)
         return
 
     if n_valid <= cfg.small_candidate_threshold:
@@ -487,7 +497,7 @@ def ensemble(args):
                 result_df[col] = result_df[col].astype(ref_df[col].dtype)
 
         # ── 10. Save ──
-        save_dir = os.path.join(base_dir, "ensembles_csv/")
+        save_dir = os.path.join(base_dir, out_subdir + "/")
         os.makedirs(save_dir, exist_ok=True)
         t_h = round(t_total / 3600, 2)
         out_file = os.path.join(save_dir, f"top{k}ens-total_run_time{t_h}h.csv")
@@ -496,14 +506,14 @@ def ensemble(args):
         print(f"  Preview: {result_df.iloc[0, :3].to_dict()}")
 
 
-def _copy_top1_as_ensemble(base_dir: str):
+def _copy_top1_as_ensemble(base_dir: str, out_subdir: str = "ensembles_csv"):
     top1_sub = os.path.join(base_dir, "top_solution/top1/submission.csv")
     if not os.path.isfile(top1_sub):
         top1_sub = os.path.join(base_dir, "best_submission/submission.csv")
     if not os.path.isfile(top1_sub):
         print(f"[WARN] No submission found to copy.")
         return
-    save_dir = os.path.join(base_dir, "ensembles_csv/")
+    save_dir = os.path.join(base_dir, out_subdir + "/")
     os.makedirs(save_dir, exist_ok=True)
     out_file = os.path.join(save_dir, "top1ens-total_run_time0.0h.csv")
     shutil.copy(top1_sub, out_file)
@@ -545,5 +555,15 @@ if __name__ == "__main__":
                         default="engine/coldstart/competition_tag_classified.json",
                         help="Path to task category JSON")
     parser.add_argument("--use_llm_selection", action="store_true")
+    parser.add_argument("--max_total_hours", type=float, default=None,
+                        help="override the cumulative-exec-time cap (default 9.0). The cap sums "
+                             "candidate training times SERIALLY even though they were trained in "
+                             "parallel, so it is conservative; lifting it is legitimate but "
+                             "changes what the ensemble claims to be reproducible within budget.")
+    parser.add_argument("--max_candidates", type=int, default=None,
+                        help="override how many top solutions may enter the sweep (default 6)")
+    parser.add_argument("--out_subdir", type=str, default=None,
+                        help="write ensembles here instead of 'ensembles_csv' (e.g. "
+                             "'ensembles_uncapped'), so a replay never overwrites the original")
     args = parser.parse_args()
     ensemble(args)
