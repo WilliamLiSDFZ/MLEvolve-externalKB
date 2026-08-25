@@ -1,0 +1,304 @@
+# jigsaw-toxic-comment-classification-challenge — three-arm experiment, REPEAT 4 (seed 45),
+# through the shared CLIProxyAPI. All three run concurrently.
+#
+#   A  mlevolve-jigsaw-base-s45    no knowledge base
+#   B  mlevolve-jigsaw-kb-s45      KB on, draft-stage injection only
+#   C  mlevolve-jigsaw-kbimp-s45   KB on, draft AND improve stages
+#
+#   kubectl apply  -f k8s/job-jigsaw-abc-s45.yaml     # 3 GPUs
+#   kubectl delete -f k8s/job-jigsaw-abc-s45.yaml
+#
+# ── Why jigsaw is the task to spend GPU time on ─────────────────────────────────────────
+# It is the only task where a decisive answer is affordable. Measured paired-difference sd:
+#
+#     jigsaw  0.0045       essay  0.038       lmsys  (see job-lmsys-abc-s44.yaml)
+#
+# At 80% power, detecting 0.005 needs about 8 draws on jigsaw and several hundred on essay.
+# jigsaw is also the largest of the three (159,571 train / 153,164 test) and is the only one of
+# the three in MLE-bench's Low-complexity split, i.e. it uses the ORIGINAL Kaggle train/test
+# split rather than one MLE-bench reconstructed.
+#
+# ── What this repeat is FOR: the first properly paired baseline ──────────────────────────
+# Draws 4-6 (seeds 42/43/44) contain only arms B and C. There is no fixed-wiring baseline on
+# jigsaw at all — analyze_runs.py currently borrows arm A from the 2026-08-07/08/09 legacy runs,
+# which is legitimate (verify_kb_injection.py §1c-bis proves arm A's prompt is byte-identical
+# across the injection fix, 4411 chars both ways) but comes from a different launch batch. Every
+# A-contrast on jigsaw is therefore reported UNPAIRED.
+#
+# This draw includes a real arm A launched alongside B and C, so it is the first jigsaw draw
+# where A-vs-B and A-vs-C are paired. That matters more than the extra data point: an unpaired
+# contrast carries between-batch variance that a paired one does not.
+#
+# ── The contrast that is actually close to settling ─────────────────────────────────────
+# Graded against private answers at matched K, over draws 4-6:
+#
+#     contrast   n   mean        95% CI                signs
+#     C - B      3   +0.00943    [-0.00331, +0.02217]  +++      <- narrowest, all positive
+#     B - A      3   -0.01090    [-0.03704, +0.01525]  +--      (unpaired)
+#     C - A      3   -0.00146    [-0.01844, +0.01551]  +--      (unpaired)
+#
+# C-B is positive in every repeat and its interval only just contains zero. Injecting at the
+# improve stage beats injecting only at drafting; injecting only at drafting is not better than
+# no KB at all. This repeat takes C-B to n=4.
+#
+# ── What to look at in the solutions, not just the scores ───────────────────────────────
+# Across draws 4-6 the arms did not merely score differently, they built different things:
+#
+#     draw   A baseline          B KB@draft              C KB@draft+improve
+#     s42    ModernBERT-base     ModernBERT-base+TFIDF   DeBERTa-v3-base
+#     s43    ModernBERT-large    TF-IDF only             TF-IDF + LogReg
+#     s44    ModernBERT-large    TF-IDF only             ModernBERT + bert-mini
+#
+# The baseline reliably reaches for a strong pretrained transformer; arm B abandoned transformers
+# for TF-IDF in two of three repeats, and those are the two worst scores in the table. Working
+# hypothesis: the retrieved techniques are method-level (feature engineering, class imbalance)
+# rather than model-level, and drafting is exactly where the backbone gets chosen, so an agent
+# told to implement hand-crafted features builds the pipeline that hosts them. This is the mirror
+# image of MLE-STAR, which retrieves models precisely because LLMs left alone pick weak familiar
+# options — and which names this competition: "we observe that LLMs propose models like logistic
+# regression even for competitions like jigsaw-toxic-comment-classification".
+#
+# So after this run, check what each arm built before reading the scores:
+#
+#   for a in base kb kbimp; do echo "== $a"; grep -ohiE '"[a-z0-9/-]*(bert|roberta|electra)[a-z0-9.-]*"|TfidfVectorizer' \
+#     runs/*jigsaw-$a-s45/logs/best_solution.py | sort -u; done
+#
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-jigsaw-kb-s45    | grep -E "cached, .* missing|injected at draft"
+#   kubectl logs job/mlevolve-jigsaw-kbimp-s45 | grep -E "injected at draft|literature techniques"
+#   kubectl logs job/mlevolve-jigsaw-base-s45  | grep -c "injected at draft"   # must be 0
+# The two KB arms must print the SAME draft digest — retrieval is deterministic per task, so a
+# difference means the paper cache moved under them, which is what invalidated essay seed 42.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-base-s45
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    repeat: "7"
+    variant: kb-off
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        repeat: "7"
+        variant: kb-off
+        arm: a-baseline
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-base-s45"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "36"               # port 5041
+        - name: EXTRA_RUN_ARGS
+          value: "agent.seed=45"
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kb-s45
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    repeat: "7"
+    variant: kb-on
+    arm: b-draft-only
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        repeat: "7"
+        variant: kb-on
+        arm: b-draft-only
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kb-s45"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "37"               # port 5042
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=45
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jigsaw-kbimp-s45
+  labels:
+    app: mlevolve
+    experiment: jigsaw
+    repeat: "7"
+    variant: kb-on
+    arm: c-draft-plus-improve
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 46800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw
+        repeat: "7"
+        variant: kb-on
+        arm: c-draft-plus-improve
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-toxic-comment-classification-challenge"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jigsaw-kbimp-s45"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "38"               # port 5043
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=45
+            methodology_retrieval=lazy
+            methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
+            abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
+            coldstart.inject_into_improve=True
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across all three arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
