@@ -251,4 +251,20 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
         logger.info("Knowledge injected at draft: NOTHING (kb path set but retrieval "
                     "returned empty) — this arm is running as an expensive baseline")
 
+    # Record WHAT THE CORPUS CONTAINED, separately from what was injected. Deliberately outside
+    # the `if methodology_text` branch: a run that retrieved nothing is exactly the case where
+    # knowing which venues were in the pool matters most.
+    #
+    # The IMPORT is inside the try, not just the call. kb_snapshot.py is a separate file, and a
+    # deploy that copies knowledge.py without it raises ImportError here — in a function every
+    # arm calls, at cold start, killing the job in the first minute. That happened: essay s47
+    # died with BackoffLimitExceeded before writing a single node. A diagnostic must not be able
+    # to end a run, and "must not" has to include failing to load.
+    try:
+        from engine.coldstart.kb_snapshot import write_kb_snapshot
+        write_kb_snapshot(cfg)
+    except Exception as e:  # pragma: no cover
+        logger.warning("KB snapshot unavailable (%s: %s) — continuing without it",
+                       type(e).__name__, e)
+
     return text
