@@ -161,8 +161,17 @@ class Config(Hashable):
     max_extractions_per_coldstart: int = 20
     lazy_extract_workers: int = 4
     lazy_technique_rerank: bool = True
-    lazy_tech_top_n: int = 12
+    lazy_tech_top_n: int = 0            # 0 = unlimited
     lazy_tech_min_score: float = 0.3
+    # Agent paper filter — replaces the technique reranker when on. Every key here must also
+    # exist in config.yaml AND vice versa: OmegaConf.merge validates against this dataclass, so
+    # a key present only in the YAML raises ConfigKeyError at startup and kills the run before
+    # it writes anything. That has happened; utils/verify_kb_injection.py section 1d now checks
+    # top-level keys, not only coldstart.* ones.
+    agent_paper_filter: bool = True
+    filter_min_keep: int = 5
+    filter_max_keep: int = 15
+    filter_batch_size: int = 10
     retr_center_embeddings: bool = True
     retr_query_mode: str = "llm"
     retr_query_cache_dir: str = ""

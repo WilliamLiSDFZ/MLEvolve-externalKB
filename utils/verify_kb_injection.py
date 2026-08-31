@@ -234,6 +234,55 @@ def main() -> int:
     print("\n1d. the real OmegaConf config accepts the new fields")
     from omegaconf import OmegaConf
     real = OmegaConf.load(Path(__file__).resolve().parent.parent / "config" / "config.yaml")
+
+    # The check that matters most, and the one this section did NOT do until it bit us: config.yaml
+    # is merged against the @dataclass Config schema, so a TOP-LEVEL key present in the YAML but
+    # absent from the dataclass raises ConfigKeyError during load_cfg — before the run writes a
+    # single line. `agent_paper_filter` shipped that way and killed a job at startup. Comparing
+    # only coldstart.* keys, as this section used to, cannot catch it.
+    import dataclasses
+
+    from config import Config
+
+    schema_keys = {f.name for f in dataclasses.fields(Config)}
+    yaml_keys = {k for k in real.keys() if not isinstance(real[k], type(real))
+                 or not hasattr(real[k], "keys")}
+    yaml_top = set(real.keys())
+    missing_in_schema = sorted(yaml_top - schema_keys)
+    ok &= check("every top-level config.yaml key exists in the Config dataclass",
+                not missing_in_schema,
+                f"missing: {missing_in_schema}" if missing_in_schema else "")
+    # The reverse is only a warning: a schema key with a default need not appear in the YAML.
+    only_in_schema = sorted(schema_keys - yaml_top)
+    if only_in_schema:
+        print(f"    (note: {len(only_in_schema)} schema key(s) not in config.yaml, using "
+              f"defaults: {only_in_schema[:6]}{'...' if len(only_in_schema) > 6 else ''})")
+
+    # Then call the real loader rather than reimplementing its merge. Reproducing the merge by
+    # hand meant chasing an ever-growing list of runtime-supplied null fields (data_dir, then
+    # exp_name, ...) and testing a lookalike instead of the thing. load_cfg() IS what run.py
+    # calls, so this fails exactly when startup would.
+    import config as cfgmod
+
+    saved_argv = sys.argv
+    try:
+        sys.argv = ["run.py", "exp_id=verify", "dataset_dir=/tmp",
+                    "data_dir=/tmp", "desc_file=/tmp/desc.md",
+                    "log_dir=/tmp/verify_cfg", "workspace_dir=/tmp/verify_cfg"]
+        loaded = cfgmod.load_cfg()
+        ok &= check("load_cfg() succeeds — the exact call run.py makes at startup",
+                    loaded is not None)
+        ok &= check("new retrieval keys survive the load",
+                    loaded.agent_paper_filter is not None
+                    and int(loaded.filter_max_keep) > 0
+                    and int(loaded.retr_token_budget) > 0,
+                    f"filter={loaded.agent_paper_filter} max_keep={loaded.filter_max_keep} "
+                    f"budget={loaded.retr_token_budget}")
+    except Exception as e:
+        ok &= check("load_cfg() succeeds — the exact call run.py makes at startup", False,
+                    f"{type(e).__name__}: {e}")
+    finally:
+        sys.argv = saved_argv
     for k in ("methodology_text", "inject_into_improve", "improve_token_budget"):
         ok &= check(f"coldstart.{k} present in config.yaml", k in real.coldstart)
     real.coldstart.methodology_text = "written at runtime"   # what knowledge.py does
