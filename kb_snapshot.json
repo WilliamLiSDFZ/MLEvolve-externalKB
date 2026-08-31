@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-08-28T21:31:52",
+  "captured_at": "2026-08-29T17:09:21",
   "note": "State BEFORE this run's own on-demand extractions. Lazy mode caches into methodology_kb during the run, so the end-of-run directory will contain more than this file lists.",
   "retrieval_mode": "lazy",
   "methodology_kb": {

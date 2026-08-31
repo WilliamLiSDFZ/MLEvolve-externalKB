@@ -32,16 +32,30 @@ lazy_min_score: 0.05          # LOW relative threshold (precision recovered at a
 max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
 lazy_extract_workers: 4       # concurrent PDF+LLM extractions
 lazy_technique_rerank: True   # True = 2nd-stage technique-level retrieval over extracted content | False = inject paper-level, ranked by abstract score
+                              # IGNORED when agent_paper_filter is True (the agent replaces this stage)
+# --- agent paper filter (replaces the 2nd-stage technique reranker) ---
+# Embedding similarity cannot represent "this method needs a modality the dataset does not have":
+# multimodal meme detection sits right next to text toxicity classification in embedding space.
+# jigsaw was handed CLIP encoders and meme captions for a text-only competition and adopted
+# 3 of 89 nodes. An LLM reading title+abstract against the available data can rule those out.
+agent_paper_filter: True      # False = keep the embedding-only two-stage path
+filter_min_keep: 5            # floor: if the agent keeps fewer, top up by stage-1 score (an empty
+                              # injection turns the KB arm into an expensive baseline)
+filter_max_keep: 15           # ceiling: prompt size must not depend on how strict the agent felt
+filter_batch_size: 10         # abstracts per call; one 40-paper call degrades toward the end
 retr_center_embeddings: True  # mean-center dense vectors (fixes anisotropy; validated on 2 tasks: 4->8/10 and 8->9/10 on-topic)
 retr_query_mode: llm          # llm = distil the description into a short ML-task statement (one cached LLM call) | raw = use the description as-is
 retr_query_cache_dir: ""      # where distilled queries are cached; empty = <abstract_index_path>/../query_cache
-lazy_tech_top_n: 12           # max techniques injected (rerank mode)
+lazy_tech_top_n: 0            # max techniques injected (rerank mode); 0 = unlimited
 lazy_tech_min_score: 0.3      # relative threshold for technique similarity (precision-oriented)
 retr_alpha: 0.5               # hybrid weight: 1.0 = pure BM25, 0.0 = pure vector
 retr_pool: 30                 # candidates fetched before selection
 retr_top_n: 10                # max insights injected
 retr_min_score: 0.15          # keep hits scoring >= this fraction of the best hit
-retr_token_budget: 6000       # approx token cap on injected guidance
+retr_token_budget: 25000      # approx token cap on injected guidance.
+                              # Measured over methodology_kb: 9.9 [POSITIVE] techniques per paper,
+                              # 611 chars each. 25k tokens = ~100k chars = ~15 papers' worth, which
+                              # is what filter_max_keep allows. Was 6000, which truncated.
 retr_embedding_device: cpu    # cpu | cuda (must match the index's embedding model)
 
 # ============================================================
@@ -195,6 +209,8 @@ coldstart:
   # model to "refer to the expert technique suggestions above" while nothing injects any.
   # Default False: turning it on changes the KB arm, so it must be an explicit ablation.
   inject_into_improve: False
-  improve_token_budget: 2000          # smaller than retr_token_budget (6000) used at draft:
-                                      # the improve prompt is already very long, and this text
-                                      # is repeated at EVERY improve node.
+  improve_token_budget: 12000         # smaller than retr_token_budget used at draft, because
+                                      # this text is repeated at EVERY improve node. Was 2000,
+                                      # i.e. 8k chars — by far the tightest cap in the system and
+                                      # the one most likely to have been cutting techniques off
+                                      # mid-list.

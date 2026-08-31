@@ -23,6 +23,7 @@ import re
 import tempfile
 import time
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -186,6 +187,154 @@ def _chat(llm_cfg: Any, user_msg: str, max_tokens: int = 4096) -> str:
     client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
     resp = client.chat.completions.create(**params)
     return resp.choices[0].message.content or ""
+
+
+FILTER_PROMPT = """You are selecting research papers whose METHODS could actually be applied to a
+specific machine-learning competition.
+
+COMPETITION
+{task}
+
+AVAILABLE DATA
+{data}
+
+PAPERS
+{papers}
+
+For each paper decide:
+  "keep"       - its method could be applied to this competition with the data described above
+  "irrelevant" - the topic only overlaps superficially; the method is about something else
+  "infeasible" - the method is relevant but assumes something this competition does not have
+                 (another modality, extra annotations, a different label structure, an external
+                 corpus, human-in-the-loop, orders of magnitude more compute)
+
+Be strict on "infeasible". A method needing images, human annotations, or labels the competition
+does not provide is infeasible however well the topic matches.
+
+Return ONLY a JSON array, one object per paper, same order, no other text:
+[{{"i": 1, "decision": "keep|irrelevant|infeasible", "why": "<=15 words"}}]"""
+
+
+def _describe_data(cfg: Any) -> str:
+    """A short description of what the competition actually provides.
+
+    This block is what makes an "infeasible" judgement possible at all. Without it the model
+    cannot know that jigsaw is text-only with six binary labels, and so cannot rule out a CLIP
+    method however obviously inapplicable it is. File names and extensions establish modality
+    more reliably than prose does, so both are used.
+    """
+    parts = []
+    data_dir = Path(str(getattr(cfg, "data_dir", "") or ""))
+    if data_dir.is_dir():
+        try:
+            entries = sorted(p.name for p in list(data_dir.iterdir())[:40])
+            exts = sorted({p.suffix.lower() for p in data_dir.rglob("*")
+                           if p.is_file() and p.suffix} - {""})
+            parts.append("Files in the data directory: " + ", ".join(entries[:25]))
+            if exts:
+                parts.append("File types present: " + ", ".join(sorted(exts)[:15]))
+        except Exception as e:                      # pragma: no cover - listing must not fail us
+            logger.debug(f"[Filter] could not list data_dir: {e}")
+    return "\n".join(parts) if parts else "(not available - judge from the competition text alone)"
+
+
+def _agent_filter_papers(candidates: List[Tuple[PaperRecord, float]], task_query: str,
+                         cfg: Any) -> Tuple[List[Tuple[PaperRecord, float]], List[dict]]:
+    """Drop papers whose methods this competition cannot use, BEFORE paying to extract them.
+
+    Runs on title + abstract, so it costs one small call per batch and removes papers before any
+    PDF is downloaded — cheaper than the reranker it replaces, which filtered only after up to 20
+    full-text extractions had already been paid for.
+
+    Returns (survivors, decisions). Never raises: on any failure the full candidate list is
+    returned unchanged, because a filter that can end a 12-hour run is worse than no filter.
+    """
+    if not candidates:
+        return candidates, []
+    llm_cfg = cfg.agent.code
+    batch = max(1, int(getattr(cfg, "filter_batch_size", 10)))
+    data_desc = _describe_data(cfg)
+    decisions: List[dict] = []
+
+    for start in range(0, len(candidates), batch):
+        chunk = candidates[start:start + batch]
+        listing = "\n\n".join(
+            f"[{start + i + 1}] {getattr(r, 'title', '?')}\n"
+            f"    {(getattr(r, 'abstract', '') or '')[:1200]}"
+            for i, (r, _) in enumerate(chunk))
+        prompt = FILTER_PROMPT.format(task=task_query, data=data_desc, papers=listing)
+        try:
+            raw = _chat(llm_cfg, prompt, max_tokens=200 * len(chunk) + 300)
+            m = re.search(r"\[.*\]", raw, re.S)
+            if not m:
+                raise ValueError("no JSON array in reply")
+            for item in json.loads(m.group(0)):
+                idx = int(item.get("i", 0)) - 1
+                if 0 <= idx < len(candidates):
+                    decisions.append({"i": idx,
+                                      "decision": str(item.get("decision", "keep")).lower(),
+                                      "why": str(item.get("why", ""))[:120]})
+        except Exception as e:
+            logger.warning(f"[Filter] batch {start // batch + 1} failed ({type(e).__name__}: {e})"
+                           f" — keeping its papers unfiltered")
+            for i in range(len(chunk)):
+                decisions.append({"i": start + i, "decision": "keep", "why": "filter failed"})
+
+    # If EVERY batch failed, the filter did not run. Degrade to the previous behaviour — the full
+    # candidate list, untouched — rather than to "top N by stage-1 score", which is a third
+    # behaviour nobody chose and would silently change what the arm receives.
+    if decisions and all(d["why"] == "filter failed" for d in decisions):
+        logger.warning("[Filter] every batch failed — passing all %d candidates through unfiltered",
+                       len(candidates))
+        return candidates, decisions
+
+    verdict = {d["i"]: d for d in decisions}
+    kept_idx = [i for i in range(len(candidates))
+                if verdict.get(i, {}).get("decision", "keep") == "keep"]
+
+    # Floor: an empty injection turns the KB arm into an expensive baseline, which looks like a
+    # null result rather than a broken filter.
+    floor = int(getattr(cfg, "filter_min_keep", 5))
+    if len(kept_idx) < floor:
+        topped = [i for i in range(len(candidates)) if i not in kept_idx][:floor - len(kept_idx)]
+        logger.warning(f"[Filter] agent kept only {len(kept_idx)}; topping up with "
+                       f"{len(topped)} highest-scoring papers to reach the floor of {floor}")
+        kept_idx = sorted(kept_idx + topped)
+
+    # Ceiling: prompt size must not depend on how strict the agent happened to be.
+    ceiling = int(getattr(cfg, "filter_max_keep", 15))
+    if ceiling > 0 and len(kept_idx) > ceiling:
+        kept_idx = sorted(kept_idx)[:ceiling]       # candidates are already in stage-1 order
+
+    counts = Counter(d["decision"] for d in decisions)
+    logger.info(f"[Filter] {len(candidates)} candidates -> {len(kept_idx)} kept "
+                f"(agent: {dict(counts)})")
+    return [candidates[i] for i in kept_idx], decisions
+
+
+def _write_filter_log(cfg: Any, candidates: List[Tuple[PaperRecord, float]],
+                      decisions: List[dict], kept: List[Tuple[PaperRecord, float]]) -> None:
+    """Record every decision next to injected_knowledge.md.
+
+    Without this, "the filter dropped the wrong papers" is unfalsifiable. This project has twice
+    been misled by a diagnostic that recorded nothing (see UPDATELOG on `\\b429\\b` and on reading
+    best_solution.py), so the filter writes down what it did.
+    """
+    try:
+        log_dir = Path(getattr(cfg, "log_dir", "") or ".")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        kept_ids = {getattr(r, "id", "") for r, _ in kept}
+        verdict = {d["i"]: d for d in decisions}
+        lines = [f"# Paper filter — {len(kept)} of {len(candidates)} kept", ""]
+        for i, (rec, score) in enumerate(candidates):
+            d = verdict.get(i, {"decision": "?", "why": ""})
+            mark = "KEPT" if getattr(rec, "id", "") in kept_ids else d["decision"].upper()
+            lines.append(f"- [{mark}] ({score:.3f}) {getattr(rec, 'title', '?')[:110]}")
+            if d["why"]:
+                lines.append(f"      {d['why']}")
+        (log_dir / "paper_filter.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as e:                          # pragma: no cover
+        logger.warning(f"[Filter] could not write paper_filter.md: {e}")
 
 
 def _extract_techniques(text: str, llm_cfg: Any, retries: int = 3) -> list:
@@ -479,6 +628,22 @@ def build_lazy_guidance(task_desc: str, cfg: Any) -> str:
     min_rel = float(getattr(cfg, "lazy_min_score", 0.05))
     candidates = [(r, s) for r, s in hits if (s / best) >= min_rel]
 
+    # STAGE 2 (new): let an LLM read title+abstract and drop what this competition cannot use,
+    # BEFORE any PDF is fetched. Embedding similarity cannot make this call — a multimodal method
+    # is genuinely near a text method in embedding space; only a reader knows the dataset has no
+    # images. Placing it here also makes it cheaper than the reranker it replaces, which filtered
+    # after up to 20 extractions had already been paid for.
+    use_agent_filter = bool(getattr(cfg, "agent_paper_filter", True))
+    if use_agent_filter:
+        before = len(candidates)
+        candidates, decisions = _agent_filter_papers(candidates, query, cfg)
+        _write_filter_log(cfg, [c for c in hits if (c[1] / best) >= min_rel], decisions,
+                          candidates)
+        if not candidates:
+            logger.warning("[Filter] nothing survived; falling back to unfiltered candidates")
+            candidates = [(r, s) for r, s in hits if (s / best) >= min_rel]
+        logger.info(f"[Lazy] agent filter: {before} -> {len(candidates)} papers")
+
     cached, missing = _split_cached(candidates, kb_root)
     cap = int(getattr(cfg, "max_extractions_per_coldstart", 20))
     to_extract = missing[:cap]
@@ -511,6 +676,17 @@ def build_lazy_guidance(task_desc: str, cfg: Any) -> str:
     #          get injected, regardless of which paper they came from.
     #   False: paper-level — inject each candidate paper's [POSITIVE] sections wholesale,
     #          ordered by the abstract-retrieval score (stage-1 score only).
+    # When the agent filter ran, precision has already been recovered at the PAPER level and the
+    # review's instruction applies: inject every surviving paper's techniques whole, no second
+    # filter. The reranker stays reachable with agent_paper_filter=False so the previous design
+    # remains runnable — every result to date was produced with it, and being able to re-run it
+    # is what makes this change measurable rather than merely different.
+    if use_agent_filter:
+        techniques = _split_techniques(available, kb_root)
+        logger.info(f"[Lazy] injecting ALL {len(techniques)} techniques from "
+                    f"{len(available)} filtered papers (budget {budget_chars} chars)")
+        return _assemble_techniques(techniques, budget_chars)
+
     if bool(getattr(cfg, "lazy_technique_rerank", True)):
         techniques = _split_techniques(available, kb_root)
         # Rerank against the same focused query — the full description dilutes this
