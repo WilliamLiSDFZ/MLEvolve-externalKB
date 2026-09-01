@@ -71,10 +71,32 @@ kubectl -n <NS> delete job mlevolve-${EXP_ID}
 | where | knob | default | note |
 |---|---|---|---|
 | job yaml | resources | 8 CPU / 32Gi / 1 GPU | keep `CPUS_PER_TASK` env in sync with the CPU limit |
-| job yaml | `activeDeadlineSeconds` | 46800 (13h) | hard kill; agent budget is 12h |
+| job yaml | `activeDeadlineSeconds` | 86400 (24h) | wall clock **including Pending** — see below; agent budget is 12h |
 | job yaml | `nodeSelector` (commented) | any GPU | pin `nvidia.com/gpu.product` if a specific card is needed |
 | entrypoint | `TIME_LIMIT_SECS` | 43200 | agent time budget passed to `run_single_task.sh` |
 | entrypoint | `EXTRA_RUN_ARGS` | from secret | extra OmegaConf overrides appended to `run.py` |
+
+### Why `activeDeadlineSeconds` is 24h and not 13h
+
+It is measured from `job.status.startTime`, which the Job controller sets when it *accepts*
+the Job — not when a pod is scheduled. **Pending time is inside the deadline.** At the old
+46800 (13h) the slack over the 12h agent budget was exactly one hour, so a pod that queued
+longer than that got `DeadlineExceeded` mid-run.
+
+That is worse than losing one run. A/B/C arms are applied together but schedule at different
+times, so a queue-delayed arm gets a *smaller* effective compute budget than its pair — an
+uncontrolled difference inside a paired comparison. `analyze_runs.py` catches the killed run
+as `terminated_early -> invalid` (no ensembles but top_solutions present), which discards the
+whole draw rather than silently biasing it; still, tasks that queue for hours (tf2qa) would
+bleed draws for a reason unrelated to the KB.
+
+The 12h budget is not enforced by this deadline anyway — `timeout --kill-after` inside
+`run_single_task.sh` is, and it always fires. `activeDeadlineSeconds` only backstops what runs
+*outside* that timeout: entrypoint setup and the unbounded `submission_fusion_utils.py` after
+it. 24h = up to ~11h queued + 12h run + ~1h fusion, and keeps the backstop.
+
+Do not lower it back to "12h + a bit". If you want a run to fail fast when the cluster is
+full, check queue depth before applying rather than shrinking this number.
 
 Multiple competitions in parallel: launch several jobs with different `EXP_ID`s — each
 gets its own pod/GPU; use distinct `SERVER_ID`s only if you ever co-locate runs in one pod

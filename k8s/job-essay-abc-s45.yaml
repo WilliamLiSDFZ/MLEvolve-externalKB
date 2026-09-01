@@ -83,7 +83,7 @@ metadata:
     arm: a-baseline
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 46800
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
   ttlSecondsAfterFinished: 259200
   template:
     metadata:
@@ -158,7 +158,7 @@ metadata:
     arm: b-draft-only
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 46800
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
   ttlSecondsAfterFinished: 259200
   template:
     metadata:
@@ -237,7 +237,7 @@ metadata:
     arm: c-draft-plus-improve
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 46800
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
   ttlSecondsAfterFinished: 259200
   template:
     metadata:

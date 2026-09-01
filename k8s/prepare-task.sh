@@ -221,6 +221,26 @@ query = od._build_query(desc, cfg)
 hits = retr.search(query, top_k=int(cfg.lazy_pool), alpha=float(cfg.retr_alpha))
 best = hits[0][1] or 1.0
 cands = [(r, s) for r, s in hits if (s / best) >= float(cfg.lazy_min_score)]
+
+# The agent filter drops most of stage-1 BEFORE anything is extracted, so checking all 40
+# stage-1 candidates for extractions asks the wrong question: the ~25 the filter rejects are
+# never fetched and cannot be raced on. Replay the filter here so `missing` means "papers a
+# real run would actually try to extract".
+stage1 = len(cands)
+if bool(getattr(cfg, "agent_paper_filter", False)):
+    fc = od._filter_cache_file(cands, query, cfg)
+    if not fc.exists():
+        print(f"  stage-1 {stage1} candidates, but the agent filter has NO cached decision")
+        print(f"    {fc}")
+        print("\n  NOT SAFE TO LAUNCH: the filter is an LLM call with no temperature (reasoning")
+        print("  models reject sampling params), so it is not deterministic. With no cached")
+        print("  decision each arm runs its own filter and can keep a DIFFERENT paper set —")
+        print("  the same class of race as the un-warmed query cache. WARM should have written")
+        print("  this file; re-run this script.")
+        sys.exit(1)
+    cands, _ = od._agent_filter_papers(cands, query, cfg)
+    print(f"  stage-1 {stage1} -> filter kept {len(cands)}  (cached decision {fc.name})")
+
 cached, missing = od._split_cached(cands, Path(cfg.methodology_kb_path))
 
 print(f"  candidates {len(cands)}: {len(cached)} cached, {len(missing)} missing")
@@ -243,5 +263,11 @@ PY
 hr
 echo "READY. In the first minutes of each run, confirm:"
 echo "    [Lazy] distilled query (cached)              <- not 'new, cached to ...'"
+echo "    [Filter] decision (cached <hash>.json)       <- not 'new, cached to ...'"
 echo "    [Lazy] N candidates: N cached, 0 missing     <- or only unextractable ones"
 echo "    Knowledge injected at draft: ... digest <X>  <- identical X in the B and C arms"
+echo
+echo "The two 'cached' lines are the ones that matter. Both the query distiller and the paper"
+echo "filter are LLM calls WITHOUT temperature (reasoning models reject sampling params), so"
+echo "either one running fresh inside an arm means that arm may have received different papers"
+echo "than its pair, and the draw is not a paired comparison."

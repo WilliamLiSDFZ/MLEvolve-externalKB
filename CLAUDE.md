@@ -102,6 +102,8 @@ kubectl -n <NS> apply -f k8s/job-<name>.yaml
 
 **A/B/C experiments.** The `job-<task>-abc*.yaml` manifests launch matched arms of one comparison in a single file (base / kb / kb-variant), distinguished by `EXP_NAME` and `EXTRA_RUN_ARGS: "agent.seed=NN"`, with a distinct `SERVER_ID` per arm (grading port = 5005 + SERVER_ID). `k8s/prepare-task.sh` must run before a multi-arm launch: besides downloading data it *warms the retrieval caches*, which is a correctness requirement, not an optimization — on a cold cache two concurrent arms each distil their own query via the LLM, get different queries, and race on the same tmp paths, making the contrast meaningless.
 
+There are **two** such caches and both must be warm: `query_cache/` (the distilled query) and `filter_cache/` (the agent paper filter's keep/drop decision). Both are LLM calls, and neither is deterministic — `_chat` passes `temperature=0` only when `supports_sampling_params(model)` is true, and every reasoning model we run on is excluded from sampling params. The filter cache is the newer of the two and was added after the tf2qa `prepare-task.sh` gate caught the divergence; `utils/verify_filter_cache.py` is the offline test that it holds (no API, ~1s). `prepare-task.sh`'s VERIFY phase now hard-fails if the filter has no cached decision, and its `missing` count is computed *after* the filter, since papers the filter drops are never fetched and cannot be raced on.
+
 ## Analysis utilities (`utils/`)
 
 Mostly written for the KB experiments; each script's docstring explains why it exists.
@@ -109,6 +111,7 @@ Mostly written for the KB experiments; each script's docstring explains why it e
 - `grade_local.py` — grade CSVs offline; unlike `mlebench grade-sample` it treats the bundled leaderboard as optional, so a stale `leaderboard.csv` can't lose you an already-computed score.
 - `compare_arms.py` — matched-K comparison table across run directories (`LABEL=path` args); enforces comparing arms only at equal ensemble size.
 - `verify_kb_injection.py` — static check of where KB text actually reaches the prompts. No GPU, no API calls.
+- `verify_filter_cache.py` — proves the agent paper filter hands every arm of a draw the same papers. Stubs the LLM with a *random* verdict on purpose; check 1 is a negative control that must show divergence without the cache.
 - `dump_injected.py` — regenerate `injected_knowledge.md` for older runs, writing only when the replay's sha1 matches the digest the run logged.
 - `submission_fusion_utils.py` — the post-run ensembler; `refuse_all.py` re-runs it with the conservative 9 h serial-time cap lifted.
 

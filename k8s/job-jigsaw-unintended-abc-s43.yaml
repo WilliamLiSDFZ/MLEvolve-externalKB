@@ -1,73 +1,27 @@
-# jigsaw-unintended-bias-in-toxicity-classification — three-arm experiment, DRAW 1 (seed 42),
-# through the shared CLIProxyAPI. All three run concurrently.
+# jigsaw-unintended-bias-in-toxicity-classification — three-arm experiment, DRAW 43, through the shared CLIProxyAPI.
 #
-#   A  mlevolve-jubias-base-s42    no knowledge base
-#   B  mlevolve-jubias-kb-s42      KB on, draft-stage injection only
-#   C  mlevolve-jubias-kbimp-s42   KB on, draft AND improve stages
+#   A  mlevolve-jubias-base-s43     no knowledge base
+#   B  mlevolve-jubias-kb-s43       KB on, draft-stage injection only
+#   C  mlevolve-jubias-kbimp-s43    KB on, draft AND improve stages
 #
-#   bash k8s/prepare-task.sh jigsaw-unintended-bias-in-toxicity-classification \
-#        "toxic,toxicity,offensive,hate,abusive,bias,fairness,debias,identity,comment,moderation"
-#   kubectl apply  -f k8s/job-jigsaw-unintended-abc.yaml     # 3 GPUs
-#   kubectl delete -f k8s/job-jigsaw-unintended-abc.yaml
+#   kubectl apply  -f k8s/job-jigsaw-unintended-abc-s43.yaml     # 3 GPUs
+#   kubectl delete -f k8s/job-jigsaw-unintended-abc-s43.yaml
 #
-# ══ WHY THIS TASK, AND WHY IT IS THE RIGHT TEST OF THE AGENT FILTER ════════════════════
-# 1.8M training rows against jigsaw-toxic's 159K — an 11x answer to "the task is too small",
-# from the review. But size is not the reason it was chosen first.
+# Rationale, prepare-task command and the checks are in k8s/job-jigsaw-unintended-abc.yaml — read that file.
 #
-# It reuses the SAME RETRIEVAL POOL as jigsaw-toxic, where we know exactly what goes wrong.
-# jigsaw-toxic was handed:
+# prepare-task.sh does NOT need re-running for this seed: the data is already prepared and the
+# query/extraction caches are warm from draw 1. Confirm before launching rather than assuming —
+# a cold cache makes concurrent arms race, which is what invalidated the essay seed-42 draw:
 #
-#     Fine-tuned CLIP multimodal encoder      Image captions for targeted-harmful memes
-#     Multimodal image-text modeling          Inline-text captions for dispirited-culture memes
+#   kubectl exec <dev-pod> -- ls /workspace/data/mlebench/jigsaw-unintended-bias-in-toxicity-classification/prepared/public
 #
-# for a text-only competition, and adopted techniques in 3 of 89 nodes (3%). Those same
-# multimodal meme papers will be retrieved here, because the domain is the same. So this run has
-# a KNOWN CORRECT ANSWER: `logs/paper_filter.md` must mark them `infeasible`. That is a much
-# sharper test than moving to an unfamiliar domain, where a bad filter and a bad corpus match
-# would be indistinguishable.
-#
-# It also keeps one variable moving at a time. A vision task would change the domain AND the
-# filter at once, and the corpus has only one vision venue (iccv-2023) against four NLP
-# venue-years, so a vision failure could not be attributed.
-#
-# ── First run with the new retrieval path ───────────────────────────────────────────────
-# This is the first experiment using `agent_paper_filter: True` (2026-08-26). The second-stage
-# technique reranker is bypassed; every surviving paper's techniques are injected whole, and the
-# truncation budgets were raised (retr_token_budget 6000 -> 25000, improve 2000 -> 12000).
-#
-# THE PRIMARY METRIC IS ADOPTION, NOT SCORE. jigsaw-toxic sits at 3%. One draw is enough to see
-# whether the filter moved it, with no statistics at all. Score would need 8+ draws and this is
-# draw 1 — do not read the QWK/AUC numbers as a result.
-#
-# ── prepare-task.sh is mandatory, and its phase 3 is a correctness requirement ───────────
-# Not an optimisation. On a fresh task the query cache is empty, so two arms launched together
-# each call the LLM to distil the query, get two DIFFERENT sampled queries, and race on the same
-# tmp paths — which is exactly what invalidated the essay seed-42 draw. The script downloads the
-# data, hard-gates on retrieval quality (exits non-zero below 8/10 on-topic), warms the caches,
-# then replays what each arm will see.
-#
-# Keywords matter: they are matched against paper TITLES, and a keyword matching nothing anywhere
-# silently deflates the gate. probe_retrieval.py warns about dead keywords — read that warning
-# before believing a low score. Hyphenated compounds like "human-feedback" have failed this way
-# before.
-#
-# ── Data size ───────────────────────────────────────────────────────────────────────────
-# 1.8M rows. Check free space on the PVC before preparing; the raw download plus the prepared
-# split is the largest task attempted so far.
-#
-#   kubectl exec <dev-pod> -- df -h /workspace
-#
-# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
-#   kubectl logs job/mlevolve-jubias-kb-s42 | grep -E "\[Filter\]|KB venues|injected at draft"
-#   kubectl exec <dev-pod> -- cat /workspace/MLEvolve/runs/<run>/logs/paper_filter.md
-#
-# In paper_filter.md, confirm: multimodal/meme papers marked `infeasible`, at least
-# filter_min_keep=5 survivors, no "every batch failed" warning. Both KB arms must print the same
-# draft digest and the same KB snapshot digest.
+# Launch this together with s44 if six GPUs are free. They are separated by seed, so the
+# 2026-08-25 draw-clustering fix keeps them as distinct draws even when started minutes apart —
+# but leave a gap anyway if convenient, since the seed is the only thing separating them.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-base-s42
+  name: mlevolve-jubias-base-s43
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -100,13 +54,13 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-base-s42"
+          value: "jubias-base-s43"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "51"               # port 5056
+          value: "54"               # port 5059
         - name: EXTRA_RUN_ARGS
-          value: "agent.seed=42"
+          value: "agent.seed=43"
         # Route the agent through the shared proxy. These two are not secrets; the key is.
         # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
         - name: LLM_BASE_URL
@@ -142,7 +96,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kb-s42
+  name: mlevolve-jubias-kb-s43
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -175,14 +129,14 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kb-s42"
+          value: "jubias-kb-s43"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "52"               # port 5057
+          value: "55"               # port 5060
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=42
+            agent.seed=43
             methodology_retrieval=lazy
             methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
             abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
@@ -221,7 +175,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kbimp-s42
+  name: mlevolve-jubias-kbimp-s43
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -254,14 +208,14 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kbimp-s42"
+          value: "jubias-kbimp-s43"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "53"               # port 5058
+          value: "56"               # port 5061
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=42
+            agent.seed=43
             methodology_retrieval=lazy
             methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
             abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index

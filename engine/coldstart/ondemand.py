@@ -238,6 +238,29 @@ def _describe_data(cfg: Any) -> str:
     return "\n".join(parts) if parts else "(not available - judge from the competition text alone)"
 
 
+def _filter_cache_file(candidates: List[Tuple[PaperRecord, float]], task_query: str,
+                       cfg: Any) -> Path:
+    """Where the keep/drop decision for exactly this (query, candidate set, knobs) is cached.
+
+    Sits next to the query cache so one `prepare-task.sh` run warms both, and so a stale KB
+    directory cannot hand back a decision made against a different index.
+
+    Every input that can change the decision is in the key. The model matters because a
+    different model filters differently; the knobs matter because floor/ceiling change the
+    survivor list without changing the agent's verdicts.
+    """
+    qdir = Path(getattr(cfg, "retr_query_cache_dir", "") or
+                (Path(getattr(cfg, "abstract_index_path", ".")).parent / "query_cache"))
+    ids = "|".join(sorted(str(getattr(r, "id", "")) for r, _ in candidates))
+    knobs = "|".join(str(x) for x in (
+        getattr(cfg.agent.code, "model", ""),
+        getattr(cfg, "filter_min_keep", 5),
+        getattr(cfg, "filter_max_keep", 15),
+        getattr(cfg, "filter_batch_size", 10)))
+    key = hashlib.sha1(f"{task_query}\n{ids}\n{knobs}".encode("utf-8")).hexdigest()[:16]
+    return qdir.parent / "filter_cache" / f"{key}.json"
+
+
 def _agent_filter_papers(candidates: List[Tuple[PaperRecord, float]], task_query: str,
                          cfg: Any) -> Tuple[List[Tuple[PaperRecord, float]], List[dict]]:
     """Drop papers whose methods this competition cannot use, BEFORE paying to extract them.
@@ -248,9 +271,47 @@ def _agent_filter_papers(candidates: List[Tuple[PaperRecord, float]], task_query
 
     Returns (survivors, decisions). Never raises: on any failure the full candidate list is
     returned unchanged, because a filter that can end a 12-hour run is worse than no filter.
+
+    THE DECISION IS CACHED ON DISK, and that is a correctness requirement, not a saving. This
+    call is NOT deterministic: `_chat` only passes `temperature=0` when
+    `supports_sampling_params(model)` is true, and the reasoning models we run on (gpt-5*, o*,
+    claude-opus-4-7/8, fable) are excluded from sampling params entirely — so the filter samples.
+    Without the cache, arms B and C of one draw each run their own filter and can keep different
+    paper sets, which is exactly the race `k8s/prepare-task.sh` exists to prevent. The reranker
+    this replaced was deterministic; this is not, so it needs the same treatment `_distill_query`
+    already has.
+
+    Note what the cache does and does not buy: it makes the decision *consistent* across arms,
+    not *reproducible*. A fresh cache directory yields a different survivor set. Two arms
+    launched together on a COLD cache still each call the LLM and can still diverge — warming
+    the cache beforehand (what `prepare-task.sh` does) is what makes a draw safe.
     """
     if not candidates:
         return candidates, []
+
+    cache_file = _filter_cache_file(candidates, task_query, cfg)
+    if cache_file.exists():
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            # Consume a multiset rather than test set-membership: the abstract index is not
+            # guaranteed to hold unique ids (a paper can appear under two venue-years), and a
+            # set would silently return more survivors than were kept.
+            want = Counter(payload["kept"])
+            survivors = []
+            for r, s in candidates:
+                rid = str(getattr(r, "id", ""))
+                if want[rid] > 0:
+                    want[rid] -= 1
+                    survivors.append((r, s))
+            if survivors:
+                logger.info(f"[Filter] decision (cached {cache_file.name}): "
+                            f"{len(candidates)} candidates -> {len(survivors)} kept")
+                return survivors, payload.get("decisions", [])
+            logger.warning(f"[Filter] cache {cache_file.name} matched no candidate — re-running")
+        except Exception as e:
+            logger.warning(f"[Filter] unreadable cache {cache_file.name} "
+                           f"({type(e).__name__}: {e}) — re-running")
+
     llm_cfg = cfg.agent.code
     batch = max(1, int(getattr(cfg, "filter_batch_size", 10)))
     data_desc = _describe_data(cfg)
@@ -306,10 +367,27 @@ def _agent_filter_papers(candidates: List[Tuple[PaperRecord, float]], task_query
     if ceiling > 0 and len(kept_idx) > ceiling:
         kept_idx = sorted(kept_idx)[:ceiling]       # candidates are already in stage-1 order
 
+    kept = [candidates[i] for i in kept_idx]
+
+    # Persist so every later arm reads this exact decision. Only reached when the filter really
+    # ran — the all-batches-failed path returns above without writing, because caching a
+    # degraded "keep everything" verdict would freeze one bad network minute into every arm.
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
+            {"kept": [str(getattr(r, "id", "")) for r, _ in kept], "decisions": decisions},
+            ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, cache_file)
+        where = f"new, cached to {cache_file.name}"
+    except Exception as e:
+        where = f"NOT CACHED — {type(e).__name__}: {e}"
+        logger.warning(f"[Filter] could not write {cache_file}: {e}")
+
     counts = Counter(d["decision"] for d in decisions)
     logger.info(f"[Filter] {len(candidates)} candidates -> {len(kept_idx)} kept "
-                f"(agent: {dict(counts)})")
-    return [candidates[i] for i in kept_idx], decisions
+                f"(agent: {dict(counts)}) ({where})")
+    return kept, decisions
 
 
 def _write_filter_log(cfg: Any, candidates: List[Tuple[PaperRecord, float]],

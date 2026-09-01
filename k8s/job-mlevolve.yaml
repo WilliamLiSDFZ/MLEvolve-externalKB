@@ -25,7 +25,7 @@ metadata:
     app: mlevolve
 spec:
   backoffLimit: 0                  # no auto-retry: a failed 12h GPU run should be inspected, not repeated
-  activeDeadlineSeconds: 46800     # hard stop at 13h (12h agent budget + overhead)
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
   ttlSecondsAfterFinished: 259200  # auto-clean the Job object after 3 days
   template:
     metadata:

@@ -34,7 +34,7 @@ metadata:
     variant: kb-on
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 46800     # 13 h hard stop (12 h agent budget + overhead)
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
   ttlSecondsAfterFinished: 259200
   template:
     metadata:

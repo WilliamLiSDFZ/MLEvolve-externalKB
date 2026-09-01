@@ -1,76 +1,75 @@
-# jigsaw-unintended-bias-in-toxicity-classification — three-arm experiment, DRAW 1 (seed 42),
+# tensorflow2-question-answering (Natural Questions) — three-arm experiment, DRAW 1 (seed 42),
 # through the shared CLIProxyAPI. All three run concurrently.
 #
-#   A  mlevolve-jubias-base-s42    no knowledge base
-#   B  mlevolve-jubias-kb-s42      KB on, draft-stage injection only
-#   C  mlevolve-jubias-kbimp-s42   KB on, draft AND improve stages
+#   A  mlevolve-tf2qa-base-s42    no knowledge base
+#   B  mlevolve-tf2qa-kb-s42      KB on, draft-stage injection only
+#   C  mlevolve-tf2qa-kbimp-s42   KB on, draft AND improve stages
 #
-#   bash k8s/prepare-task.sh jigsaw-unintended-bias-in-toxicity-classification \
-#        "toxic,toxicity,offensive,hate,abusive,bias,fairness,debias,identity,comment,moderation"
-#   kubectl apply  -f k8s/job-jigsaw-unintended-abc.yaml     # 3 GPUs
-#   kubectl delete -f k8s/job-jigsaw-unintended-abc.yaml
+#   bash k8s/prepare-task.sh tensorflow2-question-answering \
+#        "question,answering,reading,comprehension,retrieval,passage,span,extractive,wikipedia,context"
+#   kubectl apply  -f k8s/job-tf2qa-abc.yaml     # 3 GPUs
+#   kubectl delete -f k8s/job-tf2qa-abc.yaml
 #
-# ══ WHY THIS TASK, AND WHY IT IS THE RIGHT TEST OF THE AGENT FILTER ════════════════════
-# 1.8M training rows against jigsaw-toxic's 159K — an 11x answer to "the task is too small",
-# from the review. But size is not the reason it was chosen first.
+# ══ WHY THIS TASK ══════════════════════════════════════════════════════════════════════
+# This is the answer to the review's "找一下有没有哪个 task 的 dataset 是在 10GB 左右的".
+# Natural Questions ships full Wikipedia articles as context, so the dataset is ~20 GB against
+# jigsaw-toxic's roughly 60 MB — the largest task attempted here by a wide margin. 307K training
+# examples.
 #
-# It reuses the SAME RETRIEVAL POOL as jigsaw-toxic, where we know exactly what goes wrong.
-# jigsaw-toxic was handed:
+# It is also NLP, which matters: the corpus is aaai/acl/iclr/icml/naacl/neurips 2024+2025 plus
+# iccv-2023, so four pure-NLP venue-years against one vision venue. ACL and NAACL are full of QA,
+# retrieval and long-context work, so for once the corpus should contain methods that are both
+# relevant AND executable — the failure mode that has dominated this project.
 #
-#     Fine-tuned CLIP multimodal encoder      Image captions for targeted-harmful memes
-#     Multimodal image-text modeling          Inline-text captions for dispirited-culture memes
+# ── But this task carries a real risk, and it should be named before launching ───────────
+# It is reading comprehension, not classification: retrieve a long answer (a paragraph) and a
+# short answer (a span) from a full Wikipedia page, scored by micro F1. That is structurally
+# harder than anything attempted so far, and lmsys is the cautionary case — on that task two of
+# three arms produced ZERO valid solutions in twelve hours, 21-28 nodes each, all buggy.
 #
-# for a text-only competition, and adopted techniques in 3 of 89 nodes (3%). Those same
-# multimodal meme papers will be retrieved here, because the domain is the same. So this run has
-# a KNOWN CORRECT ANSWER: `logs/paper_filter.md` must mark them `infeasible`. That is a much
-# sharper test than moving to an unfamiliar domain, where a bad filter and a bad corpus match
-# would be indistinguishable.
+# So the first thing to check is not the score or even adoption, but whether the agent produces
+# a valid submission at all:
 #
-# It also keeps one variable moving at a time. A vision task would change the domain AND the
-# filter at once, and the corpus has only one vision venue (iccv-2023) against four NLP
-# venue-years, so a vision failure could not be attributed.
+#   kubectl exec <dev-pod> -- bash -c 'for r in /workspace/MLEvolve/runs/*tf2qa-*-s42; do
+#     echo "$(basename $r): $(ls $r/workspace/submission 2>/dev/null | wc -l) submissions"; done'
 #
-# ── First run with the new retrieval path ───────────────────────────────────────────────
-# This is the first experiment using `agent_paper_filter: True` (2026-08-26). The second-stage
-# technique reranker is bypassed; every surviving paper's techniques are injected whole, and the
-# truncation budgets were raised (retr_token_budget 6000 -> 25000, improve 2000 -> 12000).
+# If all three arms sit at zero after a few hours, the honest conclusion is that this task is
+# beyond the agent at a 12 h budget, and that is worth reporting rather than repeating.
 #
-# THE PRIMARY METRIC IS ADOPTION, NOT SCORE. jigsaw-toxic sits at 3%. One draw is enough to see
-# whether the filter moved it, with no statistics at all. Score would need 8+ draws and this is
-# draw 1 — do not read the QWK/AUC numbers as a result.
-#
-# ── prepare-task.sh is mandatory, and its phase 3 is a correctness requirement ───────────
-# Not an optimisation. On a fresh task the query cache is empty, so two arms launched together
-# each call the LLM to distil the query, get two DIFFERENT sampled queries, and race on the same
-# tmp paths — which is exactly what invalidated the essay seed-42 draw. The script downloads the
-# data, hard-gates on retrieval quality (exits non-zero below 8/10 on-topic), warms the caches,
-# then replays what each arm will see.
-#
-# Keywords matter: they are matched against paper TITLES, and a keyword matching nothing anywhere
-# silently deflates the gate. probe_retrieval.py warns about dead keywords — read that warning
-# before believing a low score. Hyphenated compounds like "human-feedback" have failed this way
-# before.
-#
-# ── Data size ───────────────────────────────────────────────────────────────────────────
-# 1.8M rows. Check free space on the PVC before preparing; the raw download plus the prepared
-# split is the largest task attempted so far.
+# ── Storage: check before preparing ─────────────────────────────────────────────────────
+# ~20 GB raw plus the prepared split, on a 512 Gi PVC that already holds several competitions,
+# the paper corpus and the run archives.
 #
 #   kubectl exec <dev-pod> -- df -h /workspace
 #
-# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
-#   kubectl logs job/mlevolve-jubias-kb-s42 | grep -E "\[Filter\]|KB venues|injected at draft"
-#   kubectl exec <dev-pod> -- cat /workspace/MLEvolve/runs/<run>/logs/paper_filter.md
+# ── prepare-task.sh, and why phase 3 is not optional ────────────────────────────────────
+# It downloads and splits the data, HARD-GATES on retrieval quality (exits non-zero below 8/10
+# on-topic), then warms the query and extraction caches. The warming is a correctness
+# requirement, not a speed-up: on a cold cache two arms launched together each distil their own
+# query via the LLM, get DIFFERENT sampled queries, and race on the same tmp paths. That is what
+# invalidated the essay seed-42 draw.
 #
-# In paper_filter.md, confirm: multimodal/meme papers marked `infeasible`, at least
-# filter_min_keep=5 survivors, no "every batch failed" warning. Both KB arms must print the same
-# draft digest and the same KB snapshot digest.
+# Keyword note: probe keywords are matched against paper TITLES. A keyword matching nothing
+# anywhere silently deflates the gate score, and hyphenated compounds have caused a false gate
+# failure before (lmsys: "human-feedback", "llm-eval"). probe_retrieval.py warns about dead
+# keywords — read the warning before believing a low score.
+#
+# ── This is a fresh task: it starts at n=0 ──────────────────────────────────────────────
+# Nothing here is poolable with jigsaw, essay or lmsys. Draws 42-44 give n=3, which is enough to
+# see whether the agent can solve the task at all and roughly where adoption lands, and nowhere
+# near enough for a score claim.
+#
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-tf2qa-kb-s42 | grep -E "\[Filter\]|KB venues|injected at draft"
+#   kubectl exec <dev-pod> -- cat /workspace/MLEvolve/runs/<run>/logs/paper_filter.md
+# Both KB arms must print the same draft digest and the same KB snapshot digest.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-base-s42
+  name: mlevolve-tf2qa-base-s42
   labels:
     app: mlevolve
-    experiment: jigsaw-unintended-bias
+    experiment: tf2-qa
     repeat: "9"
     variant: kb-off
     arm: a-baseline
@@ -82,7 +81,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: jigsaw-unintended-bias
+        experiment: tf2-qa
         repeat: "9"
         variant: kb-off
         arm: a-baseline
@@ -94,17 +93,17 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "jigsaw-unintended-bias-in-toxicity-classification"
+          value: "tensorflow2-question-answering"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-base-s42"
+          value: "tf2qa-base-s42"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "51"               # port 5056
+          value: "60"               # port 5065
         - name: EXTRA_RUN_ARGS
           value: "agent.seed=42"
         # Route the agent through the shared proxy. These two are not secrets; the key is.
@@ -142,10 +141,10 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kb-s42
+  name: mlevolve-tf2qa-kb-s42
   labels:
     app: mlevolve
-    experiment: jigsaw-unintended-bias
+    experiment: tf2-qa
     repeat: "9"
     variant: kb-on
     arm: b-draft-only
@@ -157,7 +156,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: jigsaw-unintended-bias
+        experiment: tf2-qa
         repeat: "9"
         variant: kb-on
         arm: b-draft-only
@@ -169,17 +168,17 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "jigsaw-unintended-bias-in-toxicity-classification"
+          value: "tensorflow2-question-answering"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kb-s42"
+          value: "tf2qa-kb-s42"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "52"               # port 5057
+          value: "61"               # port 5066
         - name: EXTRA_RUN_ARGS
           value: >-
             agent.seed=42
@@ -221,10 +220,10 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kbimp-s42
+  name: mlevolve-tf2qa-kbimp-s42
   labels:
     app: mlevolve
-    experiment: jigsaw-unintended-bias
+    experiment: tf2-qa
     repeat: "9"
     variant: kb-on
     arm: c-draft-plus-improve
@@ -236,7 +235,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: jigsaw-unintended-bias
+        experiment: tf2-qa
         repeat: "9"
         variant: kb-on
         arm: c-draft-plus-improve
@@ -248,17 +247,17 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "jigsaw-unintended-bias-in-toxicity-classification"
+          value: "tensorflow2-question-answering"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kbimp-s42"
+          value: "tf2qa-kbimp-s42"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "53"               # port 5058
+          value: "62"               # port 5067
         - name: EXTRA_RUN_ARGS
           value: >-
             agent.seed=42
