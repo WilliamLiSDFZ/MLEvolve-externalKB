@@ -46,7 +46,8 @@ class _TagIgnoringLoader(yaml.SafeLoader):
 
 def _reconstruct(loader, suffix, node):
     """Rebuild pathlib paths; map every other unknown tag to None. Mapping everything to None is
-    lossy in a way that bites later — see the comment in utils/dump_injected.py."""
+    lossy in a way that bites later: a Path-typed key such as `desc_file` read back as None turns
+    into Path('.') downstream, so paths must be rebuilt rather than dropped."""
     if "pathlib" in suffix and isinstance(node, yaml.SequenceNode):
         parts = [str(p) for p in loader.construct_sequence(node)]
         return str(Path(*parts)) if parts else None

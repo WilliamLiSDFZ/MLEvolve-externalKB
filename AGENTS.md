@@ -47,6 +47,7 @@ Notable behavioral switches in `config.yaml` — many double as ablation toggles
 - `agent.use_global_memory` (+ `memory_embedding_model_path`, `memory_embedding_device`) — RAG memory; **set device to `cpu` if no CUDA**, default is `cuda`.
 - `agent.search.use_stagnation_detection` — set `False` for a vanilla-MCTS baseline.
 - `coldstart.use_coldstart` — knowledge-base model recommendations.
+- `analogy.enabled` + `analogy.corpus_path` — improve-stage analogy retrieval over the paper corpus (arm D); off by default.
 
 ## Architecture
 
@@ -61,7 +62,8 @@ Notable behavioral switches in `config.yaml` — many double as ablation toggles
 - `search_node.py` — `SearchNode` (the tree node: code, plan, metric, branch_id, stage, lock, expected-child accounting) and `Journal` (the node collection, serialized to JSON).
 - `solution_manager.py` — top-K candidate tracking and best-solution persistence.
 - `conditions.py` — branch/global stagnation and multi-branch-fusion trigger predicates.
-- `coldstart/` — maps a task to recommended pretrained models via `competition_tag_classified.json` + `models_guidance_classified.json`.
+- `coldstart/` — maps a task to recommended pretrained models via `competition_tag_classified.json` + `models_guidance_classified.json`; `kb_snapshot.py` records the paper corpus a D run could search.
+- `analogy/` — per-improve-node literature retrieval (arm D): `corpus.py` builds BM25 over the KB repo's `output/paper_corpus/records.jsonl`; `agent.py` is a tools loop (`search_papers` / `read_abstract` / `submit_report`) that diagnoses the node's bottleneck, rewrites it as short queries in other subfields' vocabulary, and maps the mechanisms found back as interventions. Only ids seen in search results may be cited. `improve_agent._inject_analogy` injects the report into `prompt["Instructions"]` and stores it as `SearchNode.analogy_report`; traces in `logs/analogy/`. Never ends a run. Design: `Agentic_Knowledge_Base/docs/analogy_bm25_agent_design.md`.
 - `validation/` — `format_server.py` is a standalone Flask app (started by `launch_server.sh`) that wraps mle-bench grading; `format_client.py` calls it; `quality_check.py` does submission content/format checks and LLM-assisted fixes.
 
 Node `stage` values: `root`, `draft`, `fusion_draft`, `improve`, `debug`, `evolution`, `fusion`. Nodes are grouped into branches (`branch_id`); much of the search logic is per-branch.

@@ -152,28 +152,8 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
 
     prompt["Instructions"]["Implementation guideline"].extend(coldstart_guideline)
 
-    # Literature techniques get their OWN heading. They used to be concatenated onto
-    # coldstart_description and therefore rendered above as "Pretrained Model Strategy ->
-    # Option A [RECOMMENDED]", followed by "you MUST copy the Code template EXACTLY" — an
-    # instruction that makes no sense for a prose technique description and mislabels what
-    # these are.
-    methodology_text = getattr(agent, "methodology_text", "") or ""
-    if agent.use_coldstart and methodology_text.strip():
-        prompt["Instructions"] |= {
-            "Techniques from recent literature": [
-                "",
-                "The following techniques were retrieved from recent research papers because "
-                "they are relevant to THIS task. They are suggestions, not instructions.",
-                "",
-                "- Treat each as a hypothesis to evaluate against the task and data, not as a "
-                "recipe to copy. Adopt one only if you can state why it fits this dataset.",
-                "- Prefer a simple, well-executed baseline over an unfamiliar technique you "
-                "cannot validate — a first solution that runs and scores beats a clever one "
-                "that does not.",
-                "",
-                methodology_text,
-            ],
-        }
+    # No literature injection at draft time: retrieval now runs per improve node on the
+    # diagnosed bottleneck (engine/analogy), which does not exist before the first experiment.
 
     prompt["Instructions"] |= get_prompt_environment()
     prompt["Instructions"] |= ROBUSTNESS_GENERALIZATION_STRATEGY

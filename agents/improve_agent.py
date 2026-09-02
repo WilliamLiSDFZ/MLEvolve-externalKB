@@ -21,61 +21,54 @@ from agents.coder.diff_coder import diff_generate_and_apply
 
 logger = logging.getLogger("MLEvolve")
 
-# Digest of the last literature block logged in full, so the preview is printed once per
-# distinct payload rather than at every improve node.
-_LAST_IMPROVE_DIGEST: str = ""
+ANALOGY_SECTION = "Cross-domain mechanism suggestions (analogy search on this node's bottleneck)"
 
 
-def _inject_methodology(agent, prompt: Any, parent_node: SearchNode) -> None:
-    """Add the retrieved literature techniques to the improve prompt, in place.
+def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
+    """Run the analogy agent on this node's search state and add its report to the prompt.
 
-    No-op unless coldstart.inject_into_improve is set and the KB returned something. Writing
-    into prompt["Instructions"] (rather than into the final string) is what makes this reach
-    BOTH generation paths: the full-rewrite path compiles that dict directly, and the diff
+    Returns the injected report ("" when analogy is off, the corpus is missing, or the agent
+    found nothing) so the caller can store it on the child node. Never raises.
+
+    Writing into prompt["Instructions"] (rather than into the final string) is what makes this
+    reach BOTH generation paths: the full-rewrite path compiles that dict directly, and the diff
     path passes the same dict to the planner, whose generate_initial_plan does
     `prompt_base.copy()` and renders ["Instructions"]. `use_diff_mode` defaults to True, so
-    injecting only into the final string would have missed the path actually taken.
+    injecting only into the final string would miss the path actually taken.
     """
-    cs = getattr(agent.cfg, "coldstart", None)
-    if not (agent.use_coldstart and getattr(cs, "inject_into_improve", False)):
-        return
-
-    from engine.coldstart.knowledge import (preview_text, text_digest,
-                                            trim_methodology_text)
-
-    text = trim_methodology_text(getattr(agent, "methodology_text", "") or "",
-                                 int(getattr(cs, "improve_token_budget", 2000)))
+    try:
+        from engine.analogy.agent import retrieve_for_node
+        text = retrieve_for_node(agent, parent_node)
+    except Exception as e:  # the import itself must not be able to end a run either
+        logger.warning("[analogy] node %s: unavailable (%s: %s) — improving without it",
+                       parent_node.id, type(e).__name__, e)
+        return ""
     if not text.strip():
-        return
+        return ""
 
     prompt["Instructions"] |= {
-        "Expert technique suggestions": [
+        ANALOGY_SECTION: [
             "",
-            "Techniques retrieved from recent research papers as relevant to THIS task. "
-            "They are candidate improvements, not a checklist.",
+            "An analysis pass diagnosed the bottlenecks of the previous solution, searched recent "
+            "research papers for the SAME PROBLEM STRUCTURE in other subfields, and mapped the "
+            "mechanisms found back onto this pipeline. They are candidate improvements, not a "
+            "checklist.",
             "",
             "- Pick at most ONE per improvement step, so the change stays atomic and its "
             "effect is attributable.",
-            "- Skip any technique already tried in the Memory section above, and any you "
-            "cannot justify from this task's data and the previous run's output.",
+            "- Skip any mechanism already tried in the Memory section above, and any you cannot "
+            "justify from this task's data and the previous run's output.",
             "- Ignore all of them if your own diagnosis of the current solution points "
-            "elsewhere. A technique being published does not make it right for this dataset.",
+            "elsewhere. A mechanism working in another field does not make it right here.",
+            "- If you adopt one, say so in WHY/HOW: name the mechanism and the bottleneck it "
+            "addresses.",
             "",
             text,
         ],
     }
-    # Injection is static, so the same text recurs at every improve node. Print the preview
-    # only when the content actually changes (tracked by digest), otherwise one line — enough
-    # to confirm the injection fired without repeating the body 10-15 times per run.
-    global _LAST_IMPROVE_DIGEST
-    digest = text_digest(text)
-    if digest != _LAST_IMPROVE_DIGEST:
-        _LAST_IMPROVE_DIGEST = digest
-        logger.info("[improve] node %s: injected %d chars of literature techniques, "
-                    "digest %s\n%s", parent_node.id, len(text), digest, preview_text(text))
-    else:
-        logger.info("[improve] node %s: injected %d chars, digest %s (unchanged)",
-                    parent_node.id, len(text), digest)
+    logger.info("[improve] node %s: injected %d chars of analogy suggestions",
+                parent_node.id, len(text))
+    return text
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:
@@ -103,18 +96,12 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         "Code": wrap_code(parent_node.code),
     }
 
-    # Literature techniques (opt-in via coldstart.inject_into_improve).
-    #
-    # Added FIRST so it renders above the strategy blocks below — the plateau branch already
-    # says "You can refer to the expert technique suggestions above", which until now was a
-    # dangling reference: nothing ever injected technique suggestions into this prompt. The
-    # KB reached only draft_agent, i.e. the 3 initial drafts out of 14-19 nodes per run.
-    #
-    # The budget is deliberately smaller than draft's (coldstart.improve_token_budget = 2000
-    # vs retr_token_budget = 6000): this prompt is already very long, and the text repeats at
-    # every improve node, where over-long context degrades adherence to the strict
-    # CHANGES/WHY/HOW output format required below.
-    _inject_methodology(agent, prompt, parent_node)
+    # Analogy suggestions (opt-in via analogy.enabled): retrieved PER NODE from this node's own
+    # diagnosed bottleneck, not a static block repeated from cold start. Added FIRST so it
+    # renders above the strategy blocks below, which refer to it on a plateau. The report is
+    # capped at analogy.report_char_budget because this prompt is already very long and
+    # over-long context degrades adherence to the strict CHANGES/WHY/HOW format below.
+    analogy_report = _inject_analogy(agent, prompt, parent_node)
 
     success_patience, total_patience, branch_best_score = get_patience_counter(agent, parent_node)
     use_magnitude_prompt = (success_patience >= 2) or (total_patience >= 5)
@@ -168,7 +155,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                 "You MUST propose a **Tier 2 or Tier 3** change to break the plateau.",
                 "Do NOT propose Tier 1 (hyperparameter tuning). The current approach needs a more fundamental change.",
                 "",
-                "You can refer to the expert technique suggestions above, which are distilled from the kaggle award-winning solutions.",
+                "If a 'Cross-domain mechanism suggestions' section is present above, it was retrieved for THIS node's diagnosed bottleneck — a Tier 2/3 change built on one of those mechanisms is a strong candidate.",
                 "",
                 "After deciding your Tier 2/3 strategy, briefly describe:",
                 "- Which Tier you're using and why",
@@ -319,7 +306,8 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     from_topk = getattr(parent_node, '_topk_triggered', False)
 
     new_node = SearchNode(plan=plan, code=code, parent=parent_node, stage="improve",
-                        local_best_node=parent_node.local_best_node, from_topk=from_topk)
+                        local_best_node=parent_node.local_best_node, from_topk=from_topk,
+                        analogy_report=analogy_report or None)
     register_node(agent, new_node, prompt_complete, parent_node=parent_node)
 
     if hasattr(parent_node, '_topk_triggered'):

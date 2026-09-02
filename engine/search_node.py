@@ -73,6 +73,10 @@ class SearchNode(DataClassJsonMixin):
     from_topk: bool = field(default=False, kw_only=True)
     code_summary: Optional[str] = field(default=None, kw_only=True)
     work_dir: Optional[str] = field(default=None, kw_only=True)
+    # improve nodes only: the cross-domain mechanism suggestions this node was generated with
+    # (engine/analogy). A declared field so journal.json carries it — the adoption judge in the
+    # KB repo reads it per node.
+    analogy_report: Optional[str] = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.parent is not None:

@@ -62,10 +62,17 @@ class AgentSearch:
         self.branch_node_count: Dict[int, int] = {}
         self.use_coldstart = cfg.coldstart.use_coldstart
         self.coldstart_description = cfg.coldstart.description
-        # Literature techniques from the methodology KB, kept separate from the
-        # pretrained-model guidance above (see coldstart/knowledge.py). Empty unless
-        # methodology_kb_path is set.
-        self.methodology_text = getattr(cfg.coldstart, "methodology_text", "") or ""
+
+        # Analogy retrieval (arm D): load the paper corpus and build BM25 now rather than at the
+        # first improve node, so a wrong corpus_path shows up in the first minute of the log and
+        # the ~1-2 min tokenization does not land on the generation path. Never fatal.
+        if getattr(getattr(cfg, "analogy", None), "enabled", False):
+            try:
+                from engine.analogy.corpus import load_corpus
+                load_corpus(str(cfg.analogy.corpus_path or ""))
+            except Exception as e:
+                logger.warning(f"[analogy] corpus preload failed ({type(e).__name__}: {e}); "
+                               f"improve nodes will retry lazily")
 
         # Top-N candidates
         self.top_k = self.scfg.top_candidates_size

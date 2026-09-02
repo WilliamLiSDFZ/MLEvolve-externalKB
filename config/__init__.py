@@ -114,9 +114,19 @@ class ColdstartConfig:
     task_json_path: str
     model_json_path: str
     description: str                        # pretrained-model guidance (runtime-populated)
-    methodology_text: str = ""              # literature techniques (runtime-populated)
-    inject_into_improve: bool = False       # also show techniques to improve_agent
-    improve_token_budget: int = 2000        # budget for that injection
+
+
+@dataclass
+class AnalogyConfig:
+    """Improve-stage analogy retrieval (engine/analogy). Mirror of the `analogy:` YAML block —
+    OmegaConf.merge validates against this, so a key present in only one place kills the run
+    at startup (that happened with `agent_paper_filter`)."""
+    enabled: bool = False
+    corpus_path: str = ""
+    max_turns: int = 10
+    top_k: int = 10
+    max_mechanisms: int = 3
+    report_char_budget: int = 8000
 
 
 @dataclass
@@ -152,35 +162,7 @@ class Config(Hashable):
     cpu_number: str
 
     coldstart: ColdstartConfig
-
-    methodology_kb_path: str = ""
-    methodology_retrieval: str = "vector"
-    abstract_index_path: str = ""
-    lazy_pool: int = 40
-    lazy_min_score: float = 0.05
-    max_extractions_per_coldstart: int = 20
-    lazy_extract_workers: int = 4
-    lazy_technique_rerank: bool = True
-    lazy_tech_top_n: int = 0            # 0 = unlimited
-    lazy_tech_min_score: float = 0.3
-    # Agent paper filter — replaces the technique reranker when on. Every key here must also
-    # exist in config.yaml AND vice versa: OmegaConf.merge validates against this dataclass, so
-    # a key present only in the YAML raises ConfigKeyError at startup and kills the run before
-    # it writes anything. That has happened; utils/verify_kb_injection.py section 1d now checks
-    # top-level keys, not only coldstart.* ones.
-    agent_paper_filter: bool = True
-    filter_min_keep: int = 5
-    filter_max_keep: int = 15
-    filter_batch_size: int = 10
-    retr_center_embeddings: bool = True
-    retr_query_mode: str = "llm"
-    retr_query_cache_dir: str = ""
-    retr_alpha: float = 0.5
-    retr_pool: int = 30
-    retr_top_n: int = 10
-    retr_min_score: float = 0.15
-    retr_token_budget: int = 6000
-    retr_embedding_device: str = "cpu"
+    analogy: AnalogyConfig = field(default_factory=AnalogyConfig)
 
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)

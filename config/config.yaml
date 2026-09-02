@@ -22,41 +22,24 @@ cpu_number: 21
 # Model paths
 torch_hub_dir: ""       # path to torch hub cache, e.g. /data/pretrain_models/torch_models
 pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_models
-methodology_kb_path: ""       # vector/llm/static: KB with index|insight.md; lazy: methodology_kb ROOT (extraction cache tree). empty = off
-methodology_retrieval: vector # vector = insight-index retrieval | llm = LLM category match | static = methodology_map.json | lazy = abstract-index + on-demand extraction
 
-# --- lazy mode (methodology_retrieval: lazy) ---
-abstract_index_path: ""       # dir with the abstract index (records.jsonl/embeddings.npy/manifest.json)
-lazy_pool: 40                 # abstract-retrieval candidates (recall-oriented)
-lazy_min_score: 0.05          # LOW relative threshold (precision recovered at assembly)
-max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
-lazy_extract_workers: 4       # concurrent PDF+LLM extractions
-lazy_technique_rerank: True   # True = 2nd-stage technique-level retrieval over extracted content | False = inject paper-level, ranked by abstract score
-                              # IGNORED when agent_paper_filter is True (the agent replaces this stage)
-# --- agent paper filter (replaces the 2nd-stage technique reranker) ---
-# Embedding similarity cannot represent "this method needs a modality the dataset does not have":
-# multimodal meme detection sits right next to text toxicity classification in embedding space.
-# jigsaw was handed CLIP encoders and meme captions for a text-only competition and adopted
-# 3 of 89 nodes. An LLM reading title+abstract against the available data can rule those out.
-agent_paper_filter: True      # False = keep the embedding-only two-stage path
-filter_min_keep: 5            # floor: if the agent keeps fewer, top up by stage-1 score (an empty
-                              # injection turns the KB arm into an expensive baseline)
-filter_max_keep: 15           # ceiling: prompt size must not depend on how strict the agent felt
-filter_batch_size: 10         # abstracts per call; one 40-paper call degrades toward the end
-retr_center_embeddings: True  # mean-center dense vectors (fixes anisotropy; validated on 2 tasks: 4->8/10 and 8->9/10 on-topic)
-retr_query_mode: llm          # llm = distil the description into a short ML-task statement (one cached LLM call) | raw = use the description as-is
-retr_query_cache_dir: ""      # where distilled queries are cached; empty = <abstract_index_path>/../query_cache
-lazy_tech_top_n: 0            # max techniques injected (rerank mode); 0 = unlimited
-lazy_tech_min_score: 0.3      # relative threshold for technique similarity (precision-oriented)
-retr_alpha: 0.5               # hybrid weight: 1.0 = pure BM25, 0.0 = pure vector
-retr_pool: 30                 # candidates fetched before selection
-retr_top_n: 10                # max insights injected
-retr_min_score: 0.15          # keep hits scoring >= this fraction of the best hit
-retr_token_budget: 25000      # approx token cap on injected guidance.
-                              # Measured over methodology_kb: 9.9 [POSITIVE] techniques per paper,
-                              # 611 chars each. 25k tokens = ~100k chars = ~15 papers' worth, which
-                              # is what filter_max_keep allows. Was 6000, which truncated.
-retr_embedding_device: cpu    # cpu | cuda (must match the index's embedding model)
+# ============================================================
+#  Analogy retrieval (improve stage) — arm D when enabled
+# ============================================================
+# At every improve node an agent diagnoses the bottleneck of the node being improved, rewrites
+# it as topic-independent queries, searches the paper corpus with BM25 and maps the mechanisms
+# it finds back onto this pipeline (engine/analogy/, design doc in the KB repo:
+# docs/analogy_bm25_agent_design.md). Per-node artefacts land in logs/analogy/.
+# Nothing is injected at draft time: the query is the diagnosed local problem, which does not
+# exist before the first experiment. Every key here must also exist in config/__init__.py
+# (AnalogyConfig) — a YAML-only key is a ConfigKeyError at startup.
+analogy:
+  enabled: False                # False = arm A, unchanged
+  corpus_path: ""               # dir with records.jsonl + manifest.json (KB repo: output/paper_corpus)
+  max_turns: 10                 # hard cap on assistant turns per node (tool-use loop)
+  top_k: 10                     # default hits per search_papers call (the agent may ask up to 20)
+  max_mechanisms: 3             # mechanisms kept per report
+  report_char_budget: 8000      # cap on the injected report; whole mechanisms only
 
 # ============================================================
 #  Code execution
@@ -187,7 +170,7 @@ agent:
     exploration_constant: 1.414
     lower_bound: 0.5
     alpha: 0.01
-    phase_ratios: [0.3, 0.7]
+    phase_ratios: [ 0.3, 0.7 ]
 
 # ============================================================
 #  Cold-start knowledge
@@ -197,20 +180,3 @@ coldstart:
   task_json_path: "engine/coldstart/competition_tag_classified.json"
   model_json_path: "engine/coldstart/models_guidance_classified.json"
   description: ""                     # runtime: pretrained-model guidance ONLY
-  # Runtime: literature techniques from the methodology KB, kept SEPARATE from
-  # `description`. They used to be appended to it, which meant draft_agent presented them
-  # inside its "Pretrained Model Strategy -> Option A [RECOMMENDED]" block, i.e. paper
-  # techniques were labelled as pretrained-model recommendations and inherited that block's
-  # "copy the Code template EXACTLY" instruction. Now each is rendered under its own heading.
-  methodology_text: ""
-  # Also show the retrieved techniques to improve_agent, not just at draft time.
-  # Rationale: the KB currently reaches only the 3 initial drafts out of 14-19 nodes per run,
-  # so its causal footprint is narrow; and improve_agent's plateau prompt already tells the
-  # model to "refer to the expert technique suggestions above" while nothing injects any.
-  # Default False: turning it on changes the KB arm, so it must be an explicit ablation.
-  inject_into_improve: False
-  improve_token_budget: 12000         # smaller than retr_token_budget used at draft, because
-                                      # this text is repeated at EVERY improve node. Was 2000,
-                                      # i.e. 8k chars — by far the tightest cap in the system and
-                                      # the one most likely to have been cutting techniques off
-                                      # mid-list.
