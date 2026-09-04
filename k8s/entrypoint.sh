@@ -56,6 +56,31 @@ import torch
 print("[entrypoint] deps OK — torch", torch.__version__, "cuda", torch.cuda.is_available())
 PY
 
+# ── Arm D dependencies: fail fast, not 12 h later ──
+# engine/analogy/corpus.py needs rank_bm25 (hard) and nltk (soft: without it the tokenizer
+# silently runs WITHOUT stemming, which is a different retrieval arm — essay-ana-s49 ran that
+# way). Both are in requirements_base.txt but a venv built before 2026-09-02 lacks nltk. The
+# venv lives on the PVC, so install once from the dev pod and every Job sees it:
+#   source /workspace/MLEvolve/.venv/bin/activate && pip install nltk==3.9.1 rank-bm25==0.2.2
+case " ${EXTRA_RUN_ARGS:-} " in
+  *"analogy.enabled=True"*|*"analogy.enabled=true"*)
+    python - <<'PY' || { echo "FATAL: arm D needs nltk + rank_bm25 in the venv (see comment above)"; exit 1; }
+import sys
+missing = []
+for m in ("rank_bm25", "nltk"):
+    try:
+        __import__(m)
+    except Exception as e:
+        missing.append(f"{m}: {type(e).__name__}: {e}")
+if missing:
+    print("[entrypoint] arm D dependency check failed:", *["   - " + m for m in missing], sep="\n", file=sys.stderr)
+    sys.exit(1)
+from nltk.stem import PorterStemmer
+print("[entrypoint] arm D deps OK — rank_bm25 + nltk (stemming on)")
+PY
+    ;;
+esac
+
 # ── C compiler for torch.compile ──
 # The pytorch/pytorch *-runtime image ships no gcc, so every `torch.compile` the agent writes
 # dies with `InductorError: Failed to find C compiler` (13 of 65 nodes in the 2026-09-03
