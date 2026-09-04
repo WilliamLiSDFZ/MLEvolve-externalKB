@@ -1,44 +1,56 @@
-# learning-agency-lab-automated-essay-scoring-2 — two-arm experiment (seed 49), through the
-# shared CLIProxyAPI. Both run concurrently.
+# tensorflow2-question-answering (Natural Questions) — two-arm experiment, seed 43, through
+# the shared CLIProxyAPI. Both run concurrently.
 #
-#   A  mlevolve-essay-base-s49    no knowledge base
-#   D  mlevolve-essay-ana-s49     analogy retrieval at every improve node (engine/analogy)
+#   A  mlevolve-tf2qa-base-s43    no knowledge base
+#   D  mlevolve-tf2qa-ana-s43     analogy retrieval at every improve node (engine/analogy)
 #
-#   kubectl apply  -f k8s/job-essay-ad-s49.yaml     # 2 GPUs
-#   kubectl delete -f k8s/job-essay-ad-s49.yaml
+#   bash k8s/prepare-task.sh tensorflow2-question-answering
+#   kubectl apply  -f k8s/job-tf2qa-ad-s43.yaml     # 2 GPUs
+#   kubectl delete -f k8s/job-tf2qa-ad-s43.yaml
 #
-# This is the first draw of the improve-stage analogy agent (design:
-# Agentic_Knowledge_Base/docs/analogy_bm25_agent_design.md). There is no B/C here: the
-# cold-start retrieval those arms used is gone from this branch, and the historical B/C runs
-# (results/9.2 and earlier) are the "task-semantic retrieval" baseline the design refers to.
+# Replaces job-tf2qa-abc-s43.yaml (B/C arms, 2026-09-01): same task, same seed, retrieval
+# path swapped for the improve-stage analogy agent. The B/C tf2qa runs stay in results/ as the
+# task-semantic-retrieval baseline; nothing here is poolable with them beyond the A arm.
 #
-# Before launching:
-#   bash k8s/prepare-task.sh learning-agency-lab-automated-essay-scoring-2
-# which only checks the dataset and that /workspace/Agentic_Knowledge_Base/output/paper_corpus
-# exists (built by the KB repo's scripts/6_build_paper_corpus.py). Nothing needs warming: the
-# agent's query is each node's own diagnosed bottleneck, so there is no shared cache and the
-# two arms cannot race on one.
+# ══ WHY THIS TASK ══════════════════════════════════════════════════════════════════════
+# The answer to "找一下有没有哪个 task 的 dataset 是在 10GB 左右的": Natural Questions ships
+# full Wikipedia articles as context, ~20 GB against jigsaw-toxic's ~60 MB, 307K training
+# examples. It is NLP, so the corpus (four pure-NLP venue-years against one vision venue) should
+# hold methods that are both relevant and executable.
 #
-# ── What to look at first (n=1 draw, no statistics needed) ───────────────────────────────
+# ── The risk, named before launching ────────────────────────────────────────────────────
+# Reading comprehension, not classification: retrieve a long answer (paragraph) and a short
+# answer (span) from a full Wikipedia page, scored by micro F1. lmsys is the cautionary case —
+# two of three arms produced ZERO valid solutions in twelve hours. So the first check is not
+# score or adoption but whether either arm produces a valid submission at all:
 #
-#   ./fetch-run.sh --all
-#   less ~/nautilus/results/<D run>/logs/analogy/index.jsonl     # one line per improve node
-#   less ~/nautilus/results/<D run>/logs/analogy/<parent>_001.md  # packet, queries, hits, report
+#   kubectl exec <dev-pod> -- bash -c 'for r in /workspace/MLEvolve/runs/*tf2qa-*-s43; do
+#     echo "$(basename $r): $(ls $r/workspace/submission 2>/dev/null | wc -l) submissions"; done'
 #
-# 1. Did the agent produce reports (ok=true) at most improve nodes, in <= 10 turns, and do the
-#    diagnosed bottlenecks match what the node's execution summary actually says?
-# 2. Are the queries free of the competition's own nouns (essay, score, student...) and do the
-#    hits come from other subfields? (design §6: mechanism-family hit is the primary metric)
-# 3. Adoption: run the KB repo's measure_adoption.py — for arm D it judges each improve node
-#    against its own report. Compare with the 3% (jigsaw) / 88% (essay) B/C numbers.
-# 4. Only then score: analyze_runs.py contrasts D-A at matched K.
+# If both arms sit at zero after a few hours, the honest conclusion is that this task is beyond
+# the agent at a 12 h budget, and that is worth reporting rather than repeating.
+#
+# For the D arm there is a second question that only this task can answer: improve nodes exist
+# only once a node runs, so on a task where most nodes are buggy the analogy agent fires rarely.
+# logs/analogy/index.jsonl says how often it fired; a D arm with two invocations is not a test
+# of retrieval.
+#
+# ── Storage: check before preparing ─────────────────────────────────────────────────────
+# ~20 GB raw plus the prepared split (already on the PVC from the B/C draws).
+#   kubectl exec <dev-pod> -- df -h /workspace
+#
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-tf2qa-ana-s43 | grep -E "\[analogy\]|KB snapshot|KB venues"
+#
+# Expect `[analogy] corpus: N papers, sha1 <X>` at start and a `KB snapshot` line; the first
+# `[analogy] node ...` line comes with the first improve node, which on this task may be hours in.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-essay-base-s49
+  name: mlevolve-tf2qa-base-s43
   labels:
     app: mlevolve
-    experiment: essay
+    experiment: tf2qa
     repeat: "10"
     variant: kb-off
     arm: a-baseline
@@ -50,7 +62,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: essay
+        experiment: tf2qa
         repeat: "10"
         variant: kb-off
         arm: a-baseline
@@ -91,19 +103,19 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "learning-agency-lab-automated-essay-scoring-2"
+          value: "tensorflow2-question-answering"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "essay-base-s49"
+          value: "tf2qa-base-s43"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "69"               # port 5074
+          value: "63"               # port 5068
         - name: EXTRA_RUN_ARGS
-          value: "agent.seed=49"
+          value: "agent.seed=43"
         # Route the agent through the shared proxy. These two are not secrets; the key is.
         # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
         - name: LLM_BASE_URL
@@ -139,10 +151,10 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-essay-ana-s49
+  name: mlevolve-tf2qa-ana-s43
   labels:
     app: mlevolve
-    experiment: essay
+    experiment: tf2qa
     repeat: "10"
     variant: analogy-on
     arm: d-analogy-improve
@@ -154,7 +166,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: essay
+        experiment: tf2qa
         repeat: "10"
         variant: analogy-on
         arm: d-analogy-improve
@@ -195,20 +207,20 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "learning-agency-lab-automated-essay-scoring-2"
+          value: "tensorflow2-question-answering"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "essay-ana-s49"
+          value: "tf2qa-ana-s43"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "70"               # port 5075
+          value: "64"               # port 5069
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=49
+            agent.seed=43
             analogy.enabled=True
             analogy.corpus_path=/workspace/Agentic_Knowledge_Base/output/paper_corpus
         # Route the agent through the shared proxy. These two are not secrets; the key is.

@@ -45,7 +45,10 @@ analogy:
 #  Code execution
 # ============================================================
 exec:
-  timeout: 32400
+  timeout: 21600               # per-node execution cap, seconds. 6 h since 2026-09-04: at the old
+                               # 9 h one stuck node ate 3/4 of the 12 h run budget (14 of 65 nodes
+                               # in the 2026-09-03 jubias/tf2qa batch died this way). Runs before
+                               # that date used 32400; the analysis tier reads this from logs/config.yaml.
   agent_file_name: runfile.py
 
 # ============================================================

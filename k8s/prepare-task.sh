@@ -71,6 +71,26 @@ for v, c in sorted((m.get("venues") or {}).items()):
     print(f"    {v:<16}{c:>7}")
 PY
 
+# The tokenizer needs rank_bm25 (hard) and nltk (soft: without it stemming is silently off and
+# arm D retrieves differently). Both are in requirements_base.txt, but a venv built before
+# 2026-09-02 or with SKIP_DOMAIN=1 may lack nltk — check the venv the Job will actually use.
+(
+    source "$REPO/.venv/bin/activate"
+    python - <<'PY'
+import sys
+try:
+    import rank_bm25  # noqa: F401
+except ImportError:
+    print("FAIL: rank_bm25 missing from the MLEvolve venv — pip install rank-bm25==0.2.2"); sys.exit(1)
+try:
+    import nltk  # noqa: F401
+    print("  deps: rank_bm25 + nltk present (stemming on)")
+except ImportError:
+    print("WARN: nltk missing from the MLEvolve venv — the analogy tokenizer will run WITHOUT")
+    print("      stemming. pip install nltk==3.9.1 before launching arm D."); sys.exit(1)
+PY
+) || exit 1
+
 hr
 echo "READY. Launch the A + D arms; in the first minutes of the D arm confirm:"
 echo "    [analogy] corpus: N papers, sha1 <X>          <- corpus loaded at start"

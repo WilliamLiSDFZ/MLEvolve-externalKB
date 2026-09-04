@@ -1,44 +1,49 @@
-# learning-agency-lab-automated-essay-scoring-2 — two-arm experiment (seed 49), through the
-# shared CLIProxyAPI. Both run concurrently.
+# jigsaw-unintended-bias-in-toxicity-classification — two-arm experiment, seed 45, through
+# the shared CLIProxyAPI. Both run concurrently.
 #
-#   A  mlevolve-essay-base-s49    no knowledge base
-#   D  mlevolve-essay-ana-s49     analogy retrieval at every improve node (engine/analogy)
+#   A  mlevolve-jubias-base-s45    no knowledge base
+#   D  mlevolve-jubias-ana-s45     analogy retrieval at every improve node (engine/analogy)
 #
-#   kubectl apply  -f k8s/job-essay-ad-s49.yaml     # 2 GPUs
-#   kubectl delete -f k8s/job-essay-ad-s49.yaml
+#   bash k8s/prepare-task.sh jigsaw-unintended-bias-in-toxicity-classification
+#   kubectl apply  -f k8s/job-jigsaw-unintended-ad-s45.yaml     # 2 GPUs
+#   kubectl delete -f k8s/job-jigsaw-unintended-ad-s45.yaml
 #
-# This is the first draw of the improve-stage analogy agent (design:
-# Agentic_Knowledge_Base/docs/analogy_bm25_agent_design.md). There is no B/C here: the
-# cold-start retrieval those arms used is gone from this branch, and the historical B/C runs
-# (results/9.2 and earlier) are the "task-semantic retrieval" baseline the design refers to.
+# Seeds 45-47 are the first A/D draws on this task; the seed 42-44 files (job-jigsaw-unintended-
+# abc*.yaml) are the B/C record and will not start on this branch. Same task, same corpus,
+# same seeds convention — only the retrieval path differs, so these three draws are directly
+# comparable with the 2026-09-01 B/C draws on adoption.
 #
-# Before launching:
-#   bash k8s/prepare-task.sh learning-agency-lab-automated-essay-scoring-2
-# which only checks the dataset and that /workspace/Agentic_Knowledge_Base/output/paper_corpus
-# exists (built by the KB repo's scripts/6_build_paper_corpus.py). Nothing needs warming: the
-# agent's query is each node's own diagnosed bottleneck, so there is no shared cache and the
-# two arms cannot race on one.
+# ══ WHY THIS TASK ══════════════════════════════════════════════════════════════════════
+# 1.8M training rows (11x jigsaw-toxic) and the same domain as jigsaw-toxic, where the old
+# retrieval failed in a way we can name: it handed a text-only competition multimodal meme
+# papers and the agent adopted techniques in 3 of 89 nodes (3%). That gives this task a KNOWN
+# FAILURE to check against:
 #
-# ── What to look at first (n=1 draw, no statistics needed) ───────────────────────────────
+#   - the analogy agent's queries must not be the competition's own nouns (toxic, comment,
+#     identity...) — read logs/analogy/index.jsonl `queries`;
+#   - its reports must not cite meme/multimodal papers as mechanisms for text-only data — the
+#     "Feasibility with the available data" line of each mechanism is where that shows;
+#   - adoption (KB repo measure_adoption.py, per improve node against its own report) must move
+#     off 3%. That is the primary metric; the score needs 8+ draws and this is n<=3.
 #
-#   ./fetch-run.sh --all
-#   less ~/nautilus/results/<D run>/logs/analogy/index.jsonl     # one line per improve node
-#   less ~/nautilus/results/<D run>/logs/analogy/<parent>_001.md  # packet, queries, hits, report
+# ── Data size ───────────────────────────────────────────────────────────────────────────
+# 1.8M rows; the prepared split is already on the PVC from the B/C draws. If it is not:
+#   kubectl exec <dev-pod> -- df -h /workspace
 #
-# 1. Did the agent produce reports (ok=true) at most improve nodes, in <= 10 turns, and do the
-#    diagnosed bottlenecks match what the node's execution summary actually says?
-# 2. Are the queries free of the competition's own nouns (essay, score, student...) and do the
-#    hits come from other subfields? (design §6: mechanism-family hit is the primary metric)
-# 3. Adoption: run the KB repo's measure_adoption.py — for arm D it judges each improve node
-#    against its own report. Compare with the 3% (jigsaw) / 88% (essay) B/C numbers.
-# 4. Only then score: analyze_runs.py contrasts D-A at matched K.
+# ── Checks in the first ~40 minutes ─────────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-jubias-ana-s45 | grep -E "\[analogy\]|KB snapshot|KB venues"
+#   kubectl exec <dev-pod> -- cat /workspace/MLEvolve/runs/<run>/logs/analogy/index.jsonl
+#
+# Expect `[analogy] corpus: N papers, sha1 <X>` at start, a `KB snapshot` line, and at the first
+# improve node `[analogy] node <id>: N mechanism(s) from M queries ...` — or `no report
+# (reason)`, which is fine occasionally and a bug if it is every node.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-essay-base-s49
+  name: mlevolve-jubias-base-s45
   labels:
     app: mlevolve
-    experiment: essay
+    experiment: jigsaw-unintended-bias
     repeat: "10"
     variant: kb-off
     arm: a-baseline
@@ -50,7 +55,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: essay
+        experiment: jigsaw-unintended-bias
         repeat: "10"
         variant: kb-off
         arm: a-baseline
@@ -91,19 +96,19 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "learning-agency-lab-automated-essay-scoring-2"
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "essay-base-s49"
+          value: "jubias-base-s45"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "69"               # port 5074
+          value: "71"               # port 5076
         - name: EXTRA_RUN_ARGS
-          value: "agent.seed=49"
+          value: "agent.seed=45"
         # Route the agent through the shared proxy. These two are not secrets; the key is.
         # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
         - name: LLM_BASE_URL
@@ -139,10 +144,10 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-essay-ana-s49
+  name: mlevolve-jubias-ana-s45
   labels:
     app: mlevolve
-    experiment: essay
+    experiment: jigsaw-unintended-bias
     repeat: "10"
     variant: analogy-on
     arm: d-analogy-improve
@@ -154,7 +159,7 @@ spec:
     metadata:
       labels:
         app: mlevolve
-        experiment: essay
+        experiment: jigsaw-unintended-bias
         repeat: "10"
         variant: analogy-on
         arm: d-analogy-improve
@@ -195,20 +200,20 @@ spec:
         command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
         env:
         - name: EXP_ID
-          value: "learning-agency-lab-automated-essay-scoring-2"
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
         - name: DATASET_DIR
           value: "/workspace/data/mlebench"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "essay-ana-s49"
+          value: "jubias-ana-s45"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "70"               # port 5075
+          value: "72"               # port 5077
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=49
+            agent.seed=45
             analogy.enabled=True
             analogy.corpus_path=/workspace/Agentic_Knowledge_Base/output/paper_corpus
         # Route the agent through the shared proxy. These two are not secrets; the key is.

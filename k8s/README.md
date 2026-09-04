@@ -72,9 +72,34 @@ kubectl -n <NS> delete job mlevolve-${EXP_ID}
 |---|---|---|---|
 | job yaml | resources | 8 CPU / 32Gi / 1 GPU | keep `CPUS_PER_TASK` env in sync with the CPU limit |
 | job yaml | `activeDeadlineSeconds` | 86400 (24h) | wall clock **including Pending** — see below; agent budget is 12h |
-| job yaml | `nodeSelector` (commented) | any GPU | pin `nvidia.com/gpu.product` if a specific card is needed |
+| job yaml | `affinity.nodeAffinity` on `nvidia.com/gpu.product` | cards >= 24 GB (A/D files) | see "GPU type" below; older abc files still take any GPU |
 | entrypoint | `TIME_LIMIT_SECS` | 43200 | agent time budget passed to `run_single_task.sh` |
 | entrypoint | `EXTRA_RUN_ARGS` | from secret | extra OmegaConf overrides appended to `run.py` |
+
+### GPU type
+
+The A/D job files (`job-*-ad-s*.yaml`) require a card with at least 24 GB via
+`nodeAffinity` on `nvidia.com/gpu.product`. Without it Nautilus schedules onto whatever is
+free: the 2026-09-03 jubias/tf2qa batch landed on 8 GB, 11 GB, 22 GB, 32 GB and 44 GB cards
+across seven sites, and 64 of 65 nodes were buggy — CUDA OOM on the small cards, plus
+`InductorError: Failed to find C compiler` (the runtime image has no gcc, so `torch.compile`
+cannot work) and 9 h per-node timeouts. Only one node in the whole batch produced a valid
+submission, so every pod but one ended in `Error` (fusion found no `best_submission`).
+
+The list is wide on purpose — consumer 3090/4090 through A100 — so pods still schedule
+quickly; it excludes nothing but the small cards (on 2026-09-04 the listed products covered
+~180 nodes, 49 of them 3090s and 35 A10s). The other two failure modes from that batch are
+handled elsewhere: `entrypoint.sh` now installs `build-essential` so `torch.compile` works,
+and `config/config.yaml` caps a node at 6 h (`exec.timeout: 21600`, was 9 h). To see what the
+cluster has right now:
+
+```bash
+kubectl get nodes -L nvidia.com/gpu.product --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+```
+
+A pod stuck `Pending` with `didn't match Pod's node affinity` means none of the listed
+products has a free GPU; add a product from that listing (>= 24 GB) rather than removing the
+affinity.
 
 ### Why `activeDeadlineSeconds` is 24h and not 13h
 

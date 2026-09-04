@@ -56,6 +56,23 @@ import torch
 print("[entrypoint] deps OK — torch", torch.__version__, "cuda", torch.cuda.is_available())
 PY
 
+# ── C compiler for torch.compile ──
+# The pytorch/pytorch *-runtime image ships no gcc, so every `torch.compile` the agent writes
+# dies with `InductorError: Failed to find C compiler` (13 of 65 nodes in the 2026-09-03
+# batch). Installing here costs ~1 min per Job and needs apt egress, which Nautilus allows.
+# Best-effort: a failed install must not kill the run — the node just fails the old way.
+if command -v gcc >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+    echo "[entrypoint] C compiler present: $(gcc --version | head -1)"
+else
+    echo "[entrypoint] installing build-essential (torch.compile needs a C/C++ compiler) ..."
+    if (export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq --no-install-recommends build-essential >/dev/null 2>&1); then
+        echo "[entrypoint] C compiler installed: $(gcc --version | head -1)"
+    else
+        echo "[entrypoint] WARN: build-essential install failed — torch.compile will raise InductorError in nodes"
+    fi
+fi
+
 # ── Model caches on the PVC (survive across jobs; avoid re-downloading) ──
 export HF_HOME="${HF_HOME:-/workspace/hf_cache}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/hf_cache}"
