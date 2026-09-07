@@ -67,6 +67,43 @@ def _clip(text: Any, n: int, tail: bool = False) -> str:
     return ("…" + s[-n:]) if tail else (s[:n] + "…")
 
 
+# A warning line and the indented source line the interpreter prints after it. On the 2026-09-05
+# jubias runs 18 of a node's 21 output lines were torch FutureWarnings, the stderr came after the
+# stdout, and the 1500-char tail missed the only three informative lines (epoch loss, final score,
+# execution time) — the agent diagnosed a node it had seen no training signal for.
+_WARNING_LINE = re.compile(r"Warning:|warnings\.warn\(|^\s*warnings\.")
+# debug_agent.py stores "Parent error: … | Parent analysis: …" as the plan of a debug node whose
+# diff response carried no plan of its own — a description of the failure the node FIXED, not
+# of its design. Left unlabelled it reads as the current bottleneck.
+_DEBUG_PLACEHOLDER = "Parent error:"
+
+
+def strip_warnings(term_out: str) -> tuple[str, int]:
+    """Drop warning lines (and the indented source line that follows each) from an execution
+    output. Returns (filtered text, number of lines dropped)."""
+    out, dropped, skip_indented = [], 0, False
+    for line in str(term_out or "").splitlines():
+        if _WARNING_LINE.search(line):
+            dropped += 1
+            skip_indented = True
+            continue
+        if skip_indented and line[:1].isspace() and line.strip():
+            dropped += 1          # the `with torch.cuda.amp.autocast(...)` echo under the warning
+            continue
+        skip_indented = False
+        out.append(line)
+    return "\n".join(out), dropped
+
+
+def describe_plan(plan: str) -> str:
+    """The node's design, or a labelled note when the stored plan is debug_agent's placeholder."""
+    plan = str(plan or "")
+    if plan.lstrip().startswith(_DEBUG_PLACEHOLDER):
+        return ("(debug node; its own plan was not recorded — the text below is the parent "
+                "failure it FIXED, not the current design; see the code summary for the design)\n" + plan)
+    return plan
+
+
 def _fmt_metric(value: Any, maximize: Any) -> str:
     if value is None:
         return "n/a"
@@ -86,10 +123,19 @@ def build_packet(*, task_desc: str, data_preview: str, node_id: str, stage: str,
         desc = desc[:m.start()]
     if len(desc) > _TASK_HEAD + _TASK_TAIL:
         desc = desc[:_TASK_HEAD] + "\n\n[... middle of the description omitted ...]\n\n" + desc[-_TASK_TAIL:]
+    def _traj_plan(p: Any) -> str:
+        p = str(p or "")
+        if p.lstrip().startswith(_DEBUG_PLACEHOLDER):
+            return "fixed: " + _clip(p, 180)
+        return _clip(p, 200)
     traj = "\n".join(
         f"- {t.get('stage', '?')}: metric {t.get('metric') if t.get('metric') is not None else 'n/a'}"
-        f"{' (buggy)' if t.get('is_buggy') else ''} — {_clip(t.get('plan', ''), 200)}"
+        f"{' (buggy)' if t.get('is_buggy') else ''} — {_traj_plan(t.get('plan', ''))}"
         for t in trajectory) or "(none)"
+    tail_text, n_warn = strip_warnings(term_out)
+    tail = _clip(tail_text, _FIELD_CHARS, tail=True)
+    if n_warn:
+        tail = (tail + "\n" if tail else "") + f"({n_warn} warning line(s) omitted)"
     return f"""# SEARCH STATE
 
 ## Task (competition description; head and tail)
@@ -100,7 +146,7 @@ def build_packet(*, task_desc: str, data_preview: str, node_id: str, stage: str,
 
 ## Current solution — node {node_id} (stage: {stage})
 Design / plan:
-{_clip(design, _FIELD_CHARS)}
+{_clip(describe_plan(design), _FIELD_CHARS)}
 
 Code summary:
 {_clip(code_summary, _FIELD_CHARS) or '(none)'}
@@ -112,9 +158,9 @@ Best metric on this branch so far: {_fmt_metric(branch_best, metric_maximize)}
 Execution summary:
 {_clip(analysis, _FIELD_CHARS) or '(none)'}
 
-Tail of the run output:
+Tail of the run output (warning lines removed):
 ```
-{_clip(term_out, _FIELD_CHARS, tail=True) or '(empty)'}
+{tail or '(empty)'}
 ```
 
 ## Improvement attempts already made from this node

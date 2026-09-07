@@ -21,6 +21,9 @@ Checks, in order:
   7. draft_agent (arm E): with analogy.draft on, the task-structure report lands in the FIRST
      draft's prompt["Instructions"] and nowhere else — a root that already has a child (or one in
      flight) gets the plain arm-A prompt; with analogy.improve off, improve_agent injects nothing.
+  8. improve packet hygiene: warning lines (and their indented echo) are removed before the
+     output tail is taken, so the epoch/score lines survive; a debug node's placeholder plan
+     ("Parent error: …") is labelled as the failure it fixed rather than shown as its design.
 
 Run:  python utils/verify_analogy_injection.py
 """
@@ -368,6 +371,38 @@ def check_draft_injection():
           and "- GPU: x" in pk and "Validation behaviour" not in pk and "(none listed)" in pk)
 
 
+# ---------------------------------------------------------------- 8. packet hygiene (2026-09-07)
+
+def check_packet_hygiene():
+    print("\n8. improve packet: warning lines out of the tail, debug placeholder labelled")
+    from engine.analogy import agent as ag
+    # Shape of the 2026-09-05 jubias node: stdout first, then 18 warning lines that outweigh the
+    # 1500-char tail budget. The three informative lines must survive.
+    warn = ("/w/runfile_2.py:1162: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use x\n"
+            "  with torch.cuda.amp.autocast(enabled=amp_enabled):\n")
+    out = ("Epoch 1/1 | train_loss=0.458908 | official_score=0.769950 | overall_auc=0.809149\n"
+           "Final Validation Score: 0.7699496982293698\n" + warn * 18 +
+           "Execution time: 57 minutes seconds (time limit is 6 hours).\n")
+    filtered, dropped = ag.strip_warnings(out)
+    check("warning lines and their indented echo dropped", dropped == 36 and "Warning" not in filtered, f"dropped={dropped}")
+    check("informative lines kept, in order", filtered.splitlines()[:2][0].startswith("Epoch 1/1") and "Final Validation Score" in filtered and filtered.rstrip().endswith("(time limit is 6 hours)."))
+    pk = ag.build_packet(task_desc="t", data_preview="d", node_id="n", stage="debug",
+                         design="Parent error: RuntimeError | Parent analysis: OOM moving the model",
+                         code_summary="ModernBERT-base, one epoch", analysis="ok", metric_value=0.77,
+                         metric_maximize=True, branch_best=0.77, term_out=out, attempts="",
+                         trajectory=[{"stage": "debug", "metric": 0.77, "plan": "Parent error: RuntimeError | x"}])
+    check("packet tail carries the epoch line and the omission note",
+          "train_loss=0.458908" in pk and "warning line(s) omitted" in pk and "FutureWarning" not in pk)
+    check("debug placeholder plan labelled as a FIXED failure, not the design",
+          "failure it FIXED" in pk and "see the code summary" in pk)
+    check("trajectory marks the placeholder with 'fixed:'", "— fixed: Parent error" in pk)
+    plain = ag.build_packet(task_desc="t", data_preview="d", node_id="n", stage="improve", design="Use ordinal loss",
+                            code_summary="", analysis="", metric_value=None, metric_maximize=None, branch_best=None,
+                            term_out="loss 0.5\nloss 0.4", attempts="", trajectory=[])
+    check("ordinary plan and clean output pass through unchanged",
+          "Use ordinal loss" in plain and "FIXED" not in plain and "omitted" not in plain and "loss 0.4" in plain)
+
+
 def main() -> int:
     check_config()
     c = check_corpus()
@@ -376,6 +411,7 @@ def main() -> int:
     check_injection()
     check_node_field()
     check_draft_injection()
+    check_packet_hygiene()
     print(f"\n{'ALL CHECKS PASSED' if not _failures else f'{_failures} CHECK(S) FAILED'}")
     return 1 if _failures else 0
 
