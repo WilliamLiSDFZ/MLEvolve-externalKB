@@ -1,0 +1,242 @@
+# jigsaw-unintended-bias-in-toxicity-classification — two-arm experiment, seed 50, through the shared CLIProxyAPI. Both run concurrently.
+#
+#   A  mlevolve-jubias-base-s48    no knowledge base
+#   E  mlevolve-jubias-anad-s50    analogy agent on the TASK, injected into the FIRST draft only
+#
+#   bash k8s/prepare-task.sh jigsaw-unintended-bias-in-toxicity-classification
+#   kubectl apply  -f k8s/job-jigsaw-unintended-ae-s50.yaml     # 2 GPUs
+#   kubectl delete -f k8s/job-jigsaw-unintended-ae-s50.yaml
+#
+# Arm E (design: Agentic_Knowledge_Base/docs/analogy_draft_injection_design.md): before the first
+# draft is written, the analogy agent abstracts the task's STRUCTURE (how inputs, labels, metric
+# and evaluation constrain each other), searches the paper corpus for the same structure in other
+# subfields, and injects up to 3 mechanisms as design commitments into that one draft's prompt.
+# Drafts 2-3 and every later node get the arm-A prompt; improve-stage injection (arm D) is OFF
+# (`analogy.improve=False`), so this is a single-factor comparison against A.
+#
+# Why draft-stage: on jubias / tf2qa the D arm's agent never got to run — 12 h produced 7-12 nodes,
+# almost all buggy, so there was no improve node to hook. Seeds 48-50 keep these draws apart
+# from the A/D batches (seeds 45-47) so analyze_runs.py never merges an AD and an AE baseline.
+#
+# ── What to read (n=1 is enough for these) ────────────────────────────────────────────────
+#   kubectl logs job/mlevolve-jubias-anad-s50 | grep -E "\[analogy\]|\[draft\] injected|KB snapshot"
+#   <run>/logs/analogy/draft_001.md      packet (task, data, budget), every query + its hits, the report
+#   <run>/logs/journal.json              first draft node carries `analogy_report`
+#   python scripts/inspect_analogy.py --run <run> --show <step of draft 1>      (KB repo)
+#   python scripts/plot_analogy.py ...   funnel / retrieval (venue mix, domain-word share) / cost
+#
+# Expect at start: `[analogy] corpus: N papers, sha1 <X>`, then `[analogy] draft: N mechanism(s)
+# from M queries ...` and `[draft] injected N chars of analogy suggestions into the first draft`
+# BEFORE `Draft 1/3 code generated`. If it says `no report (reason)`, the first draft ran plain.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-base-s50
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: "10"
+    variant: kb-off
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: "10"
+        variant: kb-off
+        arm: a-baseline
+    spec:
+      restartPolicy: Never
+      # GPU type: only cards with >= 24 GB. Without this Nautilus hands out whatever is free — the
+      # 2026-09-03 batch landed on 8 GB / 11 GB / 22 GB cards and 64 of 65 nodes died, most of
+      # them CUDA OOM (see k8s/README.md "GPU type"). The list is deliberately wide (consumer
+      # 3090/4090 up to A100) so scheduling stays quick; high-end cards are allowed, not required.
+      #   kubectl get nodes -L nvidia.com/gpu.product --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090          # 24 GB
+                - NVIDIA-GeForce-RTX-4090          # 24 GB
+                - NVIDIA-TITAN-RTX                 # 24 GB
+                - NVIDIA-A10                       # 24 GB
+                - NVIDIA-RTX-A5000                 # 24 GB
+                - NVIDIA-L4                        # 24 GB
+                - Tesla-V100-SXM2-32GB             # 32 GB
+                - NVIDIA-A40                       # 48 GB
+                - NVIDIA-RTX-A6000                 # 48 GB
+                - NVIDIA-L40                       # 48 GB
+                - NVIDIA-L40S                      # 48 GB
+                - Quadro-RTX-8000                  # 48 GB
+                - NVIDIA-A100-PCIE-40GB            # 40 GB
+                - NVIDIA-A100-SXM4-40GB            # 40 GB
+                - NVIDIA-A100-80GB-PCIe            # 80 GB
+                - NVIDIA-A100-SXM4-80GB            # 80 GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-base-s50"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "81"               # port 5086
+        - name: EXTRA_RUN_ARGS
+          value: "agent.seed=50"
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across both arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-anad-s50
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: "10"
+    variant: analogy-draft
+    arm: e-analogy-draft
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: "10"
+        variant: analogy-draft
+        arm: e-analogy-draft
+    spec:
+      restartPolicy: Never
+      # GPU type: only cards with >= 24 GB. Without this Nautilus hands out whatever is free — the
+      # 2026-09-03 batch landed on 8 GB / 11 GB / 22 GB cards and 64 of 65 nodes died, most of
+      # them CUDA OOM (see k8s/README.md "GPU type"). The list is deliberately wide (consumer
+      # 3090/4090 up to A100) so scheduling stays quick; high-end cards are allowed, not required.
+      #   kubectl get nodes -L nvidia.com/gpu.product --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090          # 24 GB
+                - NVIDIA-GeForce-RTX-4090          # 24 GB
+                - NVIDIA-TITAN-RTX                 # 24 GB
+                - NVIDIA-A10                       # 24 GB
+                - NVIDIA-RTX-A5000                 # 24 GB
+                - NVIDIA-L4                        # 24 GB
+                - Tesla-V100-SXM2-32GB             # 32 GB
+                - NVIDIA-A40                       # 48 GB
+                - NVIDIA-RTX-A6000                 # 48 GB
+                - NVIDIA-L40                       # 48 GB
+                - NVIDIA-L40S                      # 48 GB
+                - Quadro-RTX-8000                  # 48 GB
+                - NVIDIA-A100-PCIE-40GB            # 40 GB
+                - NVIDIA-A100-SXM4-40GB            # 40 GB
+                - NVIDIA-A100-80GB-PCIe            # 80 GB
+                - NVIDIA-A100-SXM4-80GB            # 80 GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-anad-s50"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "82"               # port 5087
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=50
+            analogy.enabled=True
+            analogy.draft=True
+            analogy.improve=False
+            analogy.corpus_path=/workspace/Agentic_Knowledge_Base/output/paper_corpus
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across both arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

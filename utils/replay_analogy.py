@@ -13,6 +13,15 @@ to judge report quality on several tasks before spending cluster time (design do
 The task description and data preview are not stored in journal.json. Pass --desc to supply
 the description; without it, both are recovered from the node's own `prompt_input` (the improve
 prompt embeds them), which works for every run written by this codebase so far.
+
+Draft mode (arm E) replays the task-structure variant that runs before the first draft:
+
+    python utils/replay_analogy.py --draft --desc description.md [--data preview.txt] --corpus ...
+    python utils/replay_analogy.py --draft --run <run_dir> --corpus ...     # desc/preview from the run's first draft
+
+It needs no node: the packet is the task, a data preview and a nominal resource budget
+(--time-limit-h / --exec-timeout-h / --gpu). This is the offline check the design doc asks for
+before launching arm E (analogy_draft_injection_design.md §5).
 """
 from __future__ import annotations
 
@@ -26,7 +35,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.analogy.agent import build_packet, run_analogy_agent  # noqa: E402
+from engine.analogy.agent import build_packet, build_task_packet, run_analogy_agent  # noqa: E402
 from engine.analogy.corpus import load_corpus  # noqa: E402
 
 
@@ -65,6 +74,21 @@ def _recover(node: dict) -> tuple[str, str]:
     return desc, preview
 
 
+def _recover_draft(node: dict) -> tuple[str, str]:
+    """(task description, data preview) from a DRAFT prompt: the description sits between
+    '# Task description' and the next section; the preview is the assistant prefix's tail."""
+    text = _prompt_text(node)
+    desc = ""
+    m = re.search(r"# Task description\n(.*?)(?:\n# Memory\n|\n# Instructions\n)", text, re.S)
+    if m:
+        desc = m.group(1).strip()
+    preview = ""
+    m = re.search(r"examine the dataset:\n(.*)$", text, re.S)
+    if m:
+        preview = m.group(1).strip()
+    return desc, preview
+
+
 def _find_node(nodes: list[dict], key: str) -> dict:
     if key.isdigit():
         for n in nodes:
@@ -96,16 +120,51 @@ def _attempts(parent: dict, nodes: list[dict], node2parent: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", required=True, help="run directory (contains logs/journal.json)")
-    ap.add_argument("--node", required=True, help="node id prefix, or its step number")
+    ap.add_argument("--run", help="run directory (contains logs/journal.json)")
+    ap.add_argument("--node", help="node id prefix, or its step number (improve mode)")
     ap.add_argument("--corpus", required=True, help="dir with records.jsonl + manifest.json")
     ap.add_argument("--desc", help="description.md (default: recovered from the node's prompt)")
+    ap.add_argument("--draft", action="store_true",
+                    help="replay the draft-stage (task-structure) variant instead of a node")
+    ap.add_argument("--data", help="draft mode: file with the data preview text")
+    ap.add_argument("--time-limit-h", type=float, default=12.0, help="draft mode: search budget")
+    ap.add_argument("--exec-timeout-h", type=float, default=6.0, help="draft mode: per-solution cap")
+    ap.add_argument("--gpu", default="NVIDIA GeForce RTX 3090, 24 GiB", help="draft mode: GPU line")
     ap.add_argument("--out", help="write the full trace here (markdown)")
     ap.add_argument("--packet-only", action="store_true", help="print the packet and stop")
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--max-mechanisms", type=int, default=3)
     args = ap.parse_args()
 
+    mode = "draft" if args.draft else "improve"
+    if args.draft:
+        desc = preview = ""
+        if args.run:
+            j = json.loads((Path(args.run) / "logs" / "journal.json").read_text(encoding="utf-8"))
+            first = next((n for n in j.get("nodes", []) if n.get("stage") == "draft"), None)
+            if first:
+                desc, preview = _recover_draft(first)
+        if args.desc:
+            desc = Path(args.desc).read_text(encoding="utf-8")
+        if args.data:
+            preview = Path(args.data).read_text(encoding="utf-8")
+        if not desc:
+            print("FATAL: draft mode needs --desc (or --run with a draft node)", file=sys.stderr)
+            return 1
+        packet = build_task_packet(
+            task_desc=desc, data_preview=preview,
+            resources={"search budget": f"{args.time_limit_h:.1f} h wall clock for the whole search",
+                       "per-solution execution cap": f"{args.exec_timeout_h:.1f} h",
+                       "CPU cores": 8, "GPU": args.gpu},
+            pretrained="")
+        print(packet)
+        if args.packet_only:
+            return 0
+        return _run(packet, args, mode)
+
+    if not (args.run and args.node):
+        print("FATAL: --run and --node are required (or use --draft)", file=sys.stderr)
+        return 1
     jr = Path(args.run) / "logs" / "journal.json"
     j = json.loads(jr.read_text(encoding="utf-8"))
     nodes = j.get("nodes", [])
@@ -142,7 +201,10 @@ def main() -> int:
     print(packet)
     if args.packet_only:
         return 0
+    return _run(packet, args, mode)
 
+
+def _run(packet: str, args, mode: str) -> int:
     corpus = load_corpus(args.corpus)
     if corpus is None:
         return 1
@@ -155,7 +217,7 @@ def main() -> int:
     print(f"\n=== running analogy agent: {llm.model} @ {llm.base_url}, corpus {corpus.digest} "
           f"({len(corpus)} papers) ===\n")
     res = run_analogy_agent(packet, corpus, llm, max_turns=args.max_turns,
-                            max_mechanisms=args.max_mechanisms)
+                            max_mechanisms=args.max_mechanisms, mode=mode)
     for t in res.trace:
         print(t, "\n")
     print("=== REPORT (as injected) ===\n")

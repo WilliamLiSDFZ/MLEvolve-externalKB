@@ -18,6 +18,9 @@ Checks, in order:
      prompt["Instructions"], which is the dict both generation paths render (full rewrite
      compiles it directly; the diff path's generate_initial_plan does prompt_base.copy()).
   6. SearchNode has the declared `analogy_report` field and it survives to_dict().
+  7. draft_agent (arm E): with analogy.draft on, the task-structure report lands in the FIRST
+     draft's prompt["Instructions"] and nowhere else — a root that already has a child (or one in
+     flight) gets the plain arm-A prompt; with analogy.improve off, improve_agent injects nothing.
 
 Run:  python utils/verify_analogy_injection.py
 """
@@ -80,6 +83,9 @@ def check_config() -> None:
         check("analogy block reachable after merge", merged.analogy.max_turns == cfg.analogy.max_turns)
         d = merge(["analogy.enabled=True", "analogy.corpus_path=/corpus"])
         check("arm D overrides (as in k8s/job-*-ad-*.yaml) merge", d.analogy.enabled is True and d.analogy.corpus_path == "/corpus")
+        check("arm D defaults: improve on, draft off", d.analogy.improve is True and d.analogy.draft is False)
+        e = merge(["analogy.enabled=True", "analogy.draft=True", "analogy.improve=False", "analogy.corpus_path=/corpus"])
+        check("arm E overrides (as in k8s/job-*-ae-*.yaml) merge", e.analogy.draft is True and e.analogy.improve is False)
     except Exception as e:                       # noqa: BLE001
         check("full YAML merges against the Config schema", False, f"{type(e).__name__}: {e}")
     for stale in ("methodology_kb_path=/x", "coldstart.inject_into_improve=True", "analogy.bogus=1"):
@@ -245,8 +251,8 @@ def check_injection():
     from agents import improve_agent as ia
     from engine.analogy import agent as ag
 
-    def fake_agent(enabled: bool):
-        return SimpleNamespace(cfg=SimpleNamespace(analogy=SimpleNamespace(enabled=enabled)))
+    def fake_agent(enabled: bool, improve: bool = True):
+        return SimpleNamespace(cfg=SimpleNamespace(analogy=SimpleNamespace(enabled=enabled, improve=improve)))
 
     real = ag.retrieve_for_node
     ag.retrieve_for_node = lambda agent, node: MARKER if agent.cfg.analogy.enabled else ""
@@ -263,6 +269,9 @@ def check_injection():
         copied = p_on.copy()                      # what generate_initial_plan does on the diff path
         check("reaches the diff/planner path (prompt_base.copy() keeps Instructions)",
               MARKER in "\n".join(copied["Instructions"][ia.ANALOGY_SECTION]))
+        p_e = {"Instructions": {}}
+        got_e = ia._inject_analogy(fake_agent(True, improve=False), p_e, SimpleNamespace(id="n4"))
+        check("analogy.improve=False (arm E): improve injects nothing", got_e == "" and p_e["Instructions"] == {})
     finally:
         ag.retrieve_for_node = real
 
@@ -294,6 +303,71 @@ def check_node_field():
     check("defaults to None", SearchNode(code="x", stage="improve").analogy_report is None)
 
 
+# ---------------------------------------------------------------- 7. draft injection (arm E)
+
+def check_draft_injection():
+    print("\n7. draft_agent injection (arm E: first draft only)")
+    from agents import draft_agent as da
+    from engine.analogy import agent as ag
+
+    def fake_agent(enabled: bool, draft: bool, children=(), in_flight: int = 0):
+        return SimpleNamespace(
+            cfg=SimpleNamespace(analogy=SimpleNamespace(enabled=enabled, draft=draft, improve=False)),
+            virtual_root=SimpleNamespace(children=set(children), expected_child_count=in_flight))
+
+    real = ag.retrieve_for_draft
+    ag.retrieve_for_draft = lambda agent: MARKER
+    try:
+        p = {"Instructions": {"Existing": ["x"]}}
+        got = da._inject_analogy_draft(fake_agent(True, True), p)
+        sec = p["Instructions"].get(da.ANALOGY_SECTION_DRAFT)
+        check("first draft: report returned and injected under the draft heading",
+              got == MARKER and sec is not None and MARKER in "\n".join(sec))
+        check("existing instructions untouched", p["Instructions"]["Existing"] == ["x"])
+        check("adoption rules precede the report (at most one, keep it simple)",
+              sec is not None and "at most ONE" in "\n".join(sec) and "\n".join(sec).rstrip().endswith(MARKER))
+        p2 = {"Instructions": {}}
+        got2 = da._inject_analogy_draft(fake_agent(True, True, children=("d1",)), p2)
+        check("second draft (root already has a child): nothing injected", got2 == "" and p2["Instructions"] == {})
+        p3 = {"Instructions": {}}
+        got3 = da._inject_analogy_draft(fake_agent(True, True, in_flight=1), p3)
+        check("a draft in flight counts as taken: nothing injected", got3 == "" and p3["Instructions"] == {})
+        p4 = {"Instructions": {}}
+        got4 = da._inject_analogy_draft(fake_agent(True, False), p4)
+        check("analogy.draft=False (arm D): nothing injected at draft", got4 == "" and p4["Instructions"] == {})
+        p5 = {"Instructions": {}}
+        got5 = da._inject_analogy_draft(fake_agent(False, True), p5)
+        check("analogy.enabled=False: nothing injected at draft", got5 == "" and p5["Instructions"] == {})
+    finally:
+        ag.retrieve_for_draft = real
+
+    def boom(agent):
+        raise RuntimeError("simulated failure")
+    ag.retrieve_for_draft = boom
+    try:
+        p = {"Instructions": {}}
+        got = da._inject_analogy_draft(fake_agent(True, True), p)
+        check("a failing agent never propagates into draft", got == "" and p["Instructions"] == {})
+    finally:
+        ag.retrieve_for_draft = real
+
+    # The draft-mode report wording, on the same fake corpus as check 3.
+    c = _fake_corpus()
+    rep = {"bottlenecks": [{"statement": "metric is rank-based, loss is pointwise"}],
+           "mechanisms": [{"bottleneck_idx": 0, "title": "Frame averaging", "paper_ids": ["v/sym"],
+                           "object_mappings": [], "shared_relations": "s", "mechanism": "m",
+                           "intervention": "i", "feasibility": "f"}]}
+    md = ag.render_report(rep, c, 8000, mode="draft")
+    check("draft mode renders under the task-structure heading",
+          md.startswith(ag.REPORT_HEADING_DRAFT) and "Structural properties" in md and "Addresses property 0" in md)
+    check("improve mode wording unchanged",
+          ag.render_report(rep, c, 8000).startswith(ag.REPORT_HEADING) and "Addresses bottleneck 0" in ag.render_report(rep, c, 8000))
+    pk = ag.build_task_packet(task_desc="D" * 7000, data_preview="train.csv", resources={"GPU": "x"}, pretrained="")
+    check("task packet: description head+tail, data, budget, no node sections",
+          "[... middle of the description omitted ...]" in pk and "## Resource budget" in pk
+          and "- GPU: x" in pk and "Validation behaviour" not in pk and "(none listed)" in pk)
+
+
 def main() -> int:
     check_config()
     c = check_corpus()
@@ -301,6 +375,7 @@ def main() -> int:
     check_loop(c)
     check_injection()
     check_node_field()
+    check_draft_injection()
     print(f"\n{'ALL CHECKS PASSED' if not _failures else f'{_failures} CHECK(S) FAILED'}")
     return 1 if _failures else 0
 

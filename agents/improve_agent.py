@@ -36,6 +36,9 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
     `prompt_base.copy()` and renders ["Instructions"]. `use_diff_mode` defaults to True, so
     injecting only into the final string would miss the path actually taken.
     """
+    acfg = getattr(getattr(agent, "cfg", None), "analogy", None)
+    if acfg is not None and not getattr(acfg, "improve", True):
+        return ""            # arm E: the agent runs on the first draft only
     try:
         from engine.analogy.agent import retrieve_for_node
         text = retrieve_for_node(agent, parent_node)

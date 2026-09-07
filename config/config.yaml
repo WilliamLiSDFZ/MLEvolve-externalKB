@@ -35,6 +35,8 @@ pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_
 # (AnalogyConfig) — a YAML-only key is a ConfigKeyError at startup.
 analogy:
   enabled: False                # False = arm A, unchanged
+  improve: True                 # run the agent at every improve node (arm D)
+  draft: False                  # run it ONCE on the task itself, before the first draft (arm E)
   corpus_path: ""               # dir with records.jsonl + manifest.json (KB repo: output/paper_corpus)
   max_turns: 10                 # hard cap on assistant turns per node (tool-use loop)
   top_k: 10                     # default hits per search_papers call (the agent may ask up to 20)

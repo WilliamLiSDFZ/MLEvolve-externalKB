@@ -122,6 +122,8 @@ class AnalogyConfig:
     OmegaConf.merge validates against this, so a key present in only one place kills the run
     at startup (that happened with `agent_paper_filter`)."""
     enabled: bool = False
+    improve: bool = True
+    draft: bool = False
     corpus_path: str = ""
     max_turns: int = 10
     top_k: int = 10

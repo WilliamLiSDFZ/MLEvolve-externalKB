@@ -72,13 +72,13 @@ kubectl -n <NS> delete job mlevolve-${EXP_ID}
 |---|---|---|---|
 | job yaml | resources | 8 CPU / 32Gi / 1 GPU | keep `CPUS_PER_TASK` env in sync with the CPU limit |
 | job yaml | `activeDeadlineSeconds` | 86400 (24h) | wall clock **including Pending** — see below; agent budget is 12h |
-| job yaml | `affinity.nodeAffinity` on `nvidia.com/gpu.product` | cards >= 24 GB (A/D files) | see "GPU type" below; older abc files still take any GPU |
+| job yaml | `affinity.nodeAffinity` on `nvidia.com/gpu.product` | cards >= 24 GB (A/D and A/E files) | see "GPU type" below; older abc files still take any GPU |
 | entrypoint | `TIME_LIMIT_SECS` | 43200 | agent time budget passed to `run_single_task.sh` |
 | entrypoint | `EXTRA_RUN_ARGS` | from secret | extra OmegaConf overrides appended to `run.py` |
 
 ### GPU type
 
-The A/D job files (`job-*-ad-s*.yaml`) require a card with at least 24 GB via
+The A/D and A/E job files (`job-*-ad-s*.yaml`, `job-*-ae-s*.yaml`) require a card with at least 24 GB via
 `nodeAffinity` on `nvidia.com/gpu.product`. Without it Nautilus schedules onto whatever is
 free: the 2026-09-03 jubias/tf2qa batch landed on 8 GB, 11 GB, 22 GB, 32 GB and 44 GB cards
 across seven sites, and 64 of 65 nodes were buggy — CUDA OOM on the small cards, plus

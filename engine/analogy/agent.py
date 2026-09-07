@@ -21,6 +21,12 @@ analogy; BM25 only does the lookup. Two hard rules keep it honest and harmless:
 Per-node artefacts: `logs/analogy/<parent_id>_<n>.md` (packet, every tool call and its hits,
 the report) and one line in `logs/analogy/index.jsonl`; the rendered report is also stored on
 the child node (`SearchNode.analogy_report`) so `journal.json` carries what each node saw.
+
+Draft variant (arm E, 2026-09-06, design: `Agentic_Knowledge_Base/docs/analogy_draft_injection_design.md`):
+`retrieve_for_draft` runs the same loop ONCE per run, before the first draft, with `mode="draft"`
+— the packet is the task itself (description, data, resource budget, offline pretrained models)
+and the prompt asks for structural properties of the task instead of bottlenecks of a solution.
+Its trace is `logs/analogy/draft_<n>.md`; the index line carries `"stage": "draft"`.
 """
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ _APPENDED_BLOCK = re.compile(r"\n=+\n\*\*(?:REQUIRED SUBMISSION FORMAT|TASK AND 
 _FIELD_CHARS = 1500
 _ATTEMPTS_CHARS = 2500
 _TRAJECTORY_NODES = 6
+_PRETRAINED_CHARS = 1500
 
 
 def _clip(text: Any, n: int, tail: bool = False) -> str:
@@ -151,6 +158,34 @@ def packet_from_search(agent: Any, parent_node: Any) -> str:
         attempts=attempts, trajectory=trajectory)
 
 
+def build_task_packet(*, task_desc: str, data_preview: str, resources: Dict[str, Any],
+                      pretrained: str) -> str:
+    """Render the task itself — no node exists yet — for the draft-stage agent (design §3.2).
+    Same description head/tail rule as build_packet; resources and offline models replace the
+    validation/attempt/trajectory sections, because feasibility at draft time is about budget."""
+    desc = task_desc or ""
+    m = _APPENDED_BLOCK.search(desc)
+    if m:
+        desc = desc[:m.start()]
+    if len(desc) > _TASK_HEAD + _TASK_TAIL:
+        desc = desc[:_TASK_HEAD] + "\n\n[... middle of the description omitted ...]\n\n" + desc[-_TASK_TAIL:]
+    res = "\n".join(f"- {k}: {v}" for k, v in (resources or {}).items()) or "(unknown)"
+    return f"""# TASK (no solution has been written yet)
+
+## Competition description (head and tail)
+{desc.strip()}
+
+## Available data (workspace listing / preview)
+{_clip(data_preview, _DATA_CHARS)}
+
+## Resource budget
+{res}
+
+## Pretrained models available offline
+{_clip(pretrained, _PRETRAINED_CHARS) or '(none listed)'}
+"""
+
+
 # ------------------------------------------------------------------ prompts & tools
 
 SYSTEM_PROMPT = """You are a research-methodology analyst embedded in an automated machine-learning \
@@ -199,6 +234,62 @@ modality, annotation or compute this competition does not have is infeasible, sa
 ids that appeared in your search results; anything else is discarded at validation.
 
 If nothing structurally matching exists in the corpus, submit the bottlenecks with an empty \
+mechanisms list - that is a valid answer. Do not pad the report with generic advice."""
+
+SYSTEM_PROMPT_DRAFT = """You are a research-methodology analyst embedded in an automated machine-learning \
+engineering search. The search is about to write its FIRST candidate solution to a Kaggle-style \
+competition; nothing has been trained yet. The user message holds the competition description, a \
+listing of the data, the compute budget and the pretrained models available offline. Your job is \
+NOT to design the solution yourself. It is to find, in a corpus of {n_papers} recent ML papers, \
+mechanisms that handled the SAME PROBLEM STRUCTURE in OTHER subfields, and to map them back onto \
+this task as design commitments the first solution can build on.
+
+Work in four steps.
+
+STEP 1 - STRUCTURE THE TASK (write this out, before any tool call). From the description and the \
+data, identify at most 3 structural properties of the task. A structural property is a RELATION \
+between the inputs, the labels, the metric and the evaluation protocol - not the topic: a metric \
+that ordinary training losses do not optimise (rank-, kappa- or subgroup-weighted scores), a label \
+structure the default loss ignores (ordinal levels, aggregated annotators, hierarchical or \
+span-valued targets), a symmetry or invariance the evaluation implies, a data scale the compute \
+budget cannot cover naively, an input hierarchy (document -> passage -> span) the model must \
+traverse. "It is text classification" or "the data is large" are not properties on their own; \
+they become one only when related to the metric or the budget. For each property write: objects \
+(the task entities involved, by FUNCTIONAL role), relations (how they constrain each other; what a \
+naive first solution would violate), evidence (which line of the description or data shows it).
+
+STEP 2 - ABSTRACT INTO QUERIES. For each property write 2-4 search queries of 3-6 technical terms \
+each, in the vocabulary OTHER subfields use for the same relational structure. Never use the \
+competition's own domain nouns (its dataset, entities or field-specific words). Map by function, not \
+by surface similarity - "delivers payload" is a good mapping basis, "is liquid" is not. Two examples \
+of the translation expected:
+  - "swapping the two candidate answers should permute the predicted probabilities, but a plain \
+classifier is not symmetric"  ->  `permutation equivariance symmetrization`, `pairwise comparison \
+antisymmetry`, `group averaging test-time symmetrization`
+  - "the target is 2-D but the signal lives on a short depth axis whose absolute offset is arbitrary" \
+->  `nuisance variable invariance marginalization`, `shift invariant pooling projection`, \
+`3D to 2D aggregation depth invariant`
+The corpus is title + tldr + abstract matched lexically (BM25): short, specific mechanism terms \
+work; sentences do not. If a query returns unrelated papers, change the vocabulary - do not add \
+words. The same mechanism often has several names across subfields; try more than one.
+
+STEP 3 - SEARCH AND READ. Call search_papers for each query (several calls per turn are fine). \
+Judge structural match from the tldr; call read_abstract on the few that look isomorphic to confirm \
+the mechanism. Papers from the competition's own subfield count only if the mechanism transfers; \
+prefer other subfields. You have at most {max_turns} assistant turns in total, so search broadly early.
+
+STEP 4 - MAP TO A FIRST DESIGN. Call submit_report with at most {max_mechanisms} mechanisms. Each \
+must name its property (as bottleneck_idx), give explicit object mappings (task entity <-> paper \
+entity, one-line rationale each), the shared relational structure, what the paper did, and - as the \
+intervention - ONE design commitment for the FIRST solution: which component, loss, sampling or \
+evaluation choice to build in from the start, and what to expect on validation if the property is \
+real. The first solution is required to be simple (no ensembles, no hyperparameter search), so a \
+commitment may add at most one non-standard component. Judge feasibility against the "Available \
+data" and "Resource budget" sections: a mechanism needing a modality, annotation, model or compute \
+this task does not have is infeasible, say so. Cite only paper ids that appeared in your search \
+results; anything else is discarded at validation.
+
+If nothing structurally matching exists in the corpus, submit the properties with an empty \
 mechanisms list - that is a valid answer. Do not pad the report with generic advice."""
 
 _REPORT_SCHEMA: Dict[str, Any] = {
@@ -351,14 +442,26 @@ def validate_report(report: Any, seen_ids: set, corpus: PaperCorpus,
 
 
 REPORT_HEADING = "## Cross-domain mechanism suggestions (analogy search on this node's bottleneck)"
+REPORT_HEADING_DRAFT = "## Cross-domain mechanism suggestions (analogy search on this task's structure)"
+
+# The two places the agent runs. Same tools, schema and validation; the prompt and the words the
+# rendered report uses for what it diagnosed differ. `bottleneck_idx` keeps its name in the schema
+# for both so measure_adoption / inspect_analogy need no second parser.
+_MODES: Dict[str, Dict[str, str]] = {
+    "improve": {"system": SYSTEM_PROMPT, "heading": REPORT_HEADING,
+                "intro": "Diagnosed bottlenecks of the current solution:", "noun": "bottleneck"},
+    "draft": {"system": SYSTEM_PROMPT_DRAFT, "heading": REPORT_HEADING_DRAFT,
+              "intro": "Structural properties of this task that the suggestions address:", "noun": "property"},
+}
 
 
-def render_report(report: dict, corpus: PaperCorpus, budget_chars: int) -> str:
-    """Markdown for the improve prompt. Each mechanism is a `### ` block so the adoption judge
-    (KB repo measure_adoption.py, TECHNIQUE_HEADING) sees one technique per mechanism."""
+def render_report(report: dict, corpus: PaperCorpus, budget_chars: int, mode: str = "improve") -> str:
+    """Markdown for the improve (or first-draft) prompt. Each mechanism is a `### ` block so the
+    adoption judge (KB repo measure_adoption.py, TECHNIQUE_HEADING) sees one technique per mechanism."""
     if not report.get("mechanisms"):
         return ""
-    lines = [REPORT_HEADING, "", "Diagnosed bottlenecks of the current solution:"]
+    m_ = _MODES[mode]
+    lines = [m_["heading"], "", m_["intro"]]
     for i, b in enumerate(report.get("bottlenecks") or []):
         ev = f" — evidence: {b['evidence']}" if b.get("evidence") else ""
         lines.append(f"{i}. {b['statement']}{ev}")
@@ -371,7 +474,7 @@ def render_report(report: dict, corpus: PaperCorpus, budget_chars: int) -> str:
             for om in m["object_mappings"]) or "(not given)"
         blocks.append("\n".join([
             f"### {m['title']}",
-            f"*Addresses bottleneck {m['bottleneck_idx']}. Source: {cites}*",
+            f"*Addresses {m_['noun']} {m['bottleneck_idx']}. Source: {cites}*",
             "",
             f"**Shared problem structure**: {m['shared_relations'] or '(not given)'}",
             f"**Object mappings (this pipeline ↔ source)**: {maps}",
@@ -421,15 +524,16 @@ def _tool_message(msg: Any) -> dict:
 
 def run_analogy_agent(packet_md: str, corpus: PaperCorpus, llm_cfg: Any, *, max_turns: int = 10,
                       top_k: int = 10, max_mechanisms: int = 3,
-                      report_char_budget: int = 8000) -> AnalogyResult:
+                      report_char_budget: int = 8000, mode: str = "improve") -> AnalogyResult:
     """One agent episode. Raises only on programming errors; API/parse failures are caught by
-    the caller (`retrieve_for_node`), which turns them into an empty report."""
+    the callers (`retrieve_for_node`, `retrieve_for_draft`), which turn them into an empty report.
+    `mode` selects the prompt and report wording (see _MODES); everything else is shared."""
     from openai import OpenAI
 
     model = str(getattr(llm_cfg, "model", "") or "")
     client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None, timeout=600.0)
-    system = SYSTEM_PROMPT.format(n_papers=len(corpus), max_turns=max_turns,
-                                  max_mechanisms=max_mechanisms)
+    system = _MODES[mode]["system"].format(n_papers=len(corpus), max_turns=max_turns,
+                                           max_mechanisms=max_mechanisms)
     messages: List[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": packet_md}]
     res = AnalogyResult()
@@ -496,7 +600,7 @@ def run_analogy_agent(packet_md: str, corpus: PaperCorpus, llm_cfg: Any, *, max_
                     # Accepted: either something survived, or the agent honestly found nothing.
                     res.report = clean
                     res.paper_ids = sorted({i for m in clean["mechanisms"] for i in m["paper_ids"]})
-                    res.report_md = render_report(clean, corpus, report_char_budget)
+                    res.report_md = render_report(clean, corpus, report_char_budget, mode=mode)
                     if not clean["mechanisms"]:
                         res.reason = "agent found no structurally matching mechanism"
                     content = "accepted"
@@ -594,7 +698,7 @@ def retrieve_for_node(agent: Any, parent_node: Any) -> str:
                        parent_node.id, type(e).__name__, e)
 
     _write_artifacts(Path(getattr(cfg, "log_dir", "") or "."), parent_node.id, packet, res, corpus,
-                     extra={"branch_id": parent_node.branch_id,
+                     extra={"stage": "improve", "branch_id": parent_node.branch_id,
                             "parent_metric": (parent_node.metric.value if parent_node.metric is not None else None)})
     if res.report_md:
         logger.info("[analogy] node %s: %d mechanism(s) from %d quer%s in %d turns, %d chars, "
@@ -604,4 +708,83 @@ def retrieve_for_node(agent: Any, parent_node: Any) -> str:
     else:
         logger.info("[analogy] node %s: no report (%s) after %d turns, %d queries",
                     parent_node.id, res.reason or "?", res.turns, len(res.queries))
+    return res.report_md
+
+
+# ------------------------------------------------------------------ entry point for draft_agent (arm E)
+
+def _resources(cfg: Any) -> Dict[str, Any]:
+    """What the first solution may spend — the draft-stage feasibility yardstick."""
+    out: Dict[str, Any] = {}
+    try:
+        out["search budget"] = f"{float(cfg.agent.time_limit) / 3600:.1f} h wall clock for the whole search"
+    except Exception:
+        pass
+    try:
+        out["per-solution execution cap"] = f"{float(cfg.exec.timeout) / 3600:.1f} h"
+    except Exception:
+        pass
+    try:
+        out["CPU cores"] = int(getattr(cfg, "cpu_number", 0) or 0) or "unknown"
+    except Exception:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            prop = torch.cuda.get_device_properties(0)
+            out["GPU"] = f"{prop.name}, {prop.total_memory / 2 ** 30:.0f} GiB"
+        else:
+            out["GPU"] = "none"
+    except Exception:
+        out["GPU"] = "unknown"
+    return out
+
+
+def retrieve_for_draft(agent: Any) -> str:
+    """Run the agent on the TASK, before the first draft of a run, and return the report markdown
+    ("" = inject nothing). Never raises. Gated on cfg.analogy.enabled AND cfg.analogy.draft; the
+    caller (agents/draft_agent.py) decides which draft is the first one.
+    """
+    cfg = agent.cfg
+    acfg = getattr(cfg, "analogy", None)
+    if acfg is None or not getattr(acfg, "enabled", False) or not getattr(acfg, "draft", False):
+        return ""
+    try:
+        corpus = load_corpus(str(getattr(acfg, "corpus_path", "") or ""))
+    except Exception as e:
+        logger.warning("[analogy] corpus unavailable (%s: %s) — drafting without it",
+                       type(e).__name__, e)
+        return ""
+    if corpus is None:
+        return ""
+    packet = ""
+    try:
+        pretrained = (getattr(agent, "coldstart_description", "") or "") if getattr(agent, "use_coldstart", False) else ""
+        if pretrained.strip() == "None model":
+            pretrained = ""
+        packet = build_task_packet(
+            task_desc=getattr(agent, "task_desc", "") or "",
+            data_preview=getattr(agent, "data_preview", "") or "",
+            resources=_resources(cfg), pretrained=pretrained)
+        res = run_analogy_agent(
+            packet, corpus, cfg.agent.code, mode="draft",
+            max_turns=int(getattr(acfg, "max_turns", 10)),
+            top_k=int(getattr(acfg, "top_k", 10)),
+            max_mechanisms=int(getattr(acfg, "max_mechanisms", 3)),
+            report_char_budget=int(getattr(acfg, "report_char_budget", 8000)))
+    except Exception as e:
+        res = AnalogyResult(reason=f"{type(e).__name__}: {e}")
+        res.trace.append(f"EXCEPTION: {type(e).__name__}: {e}")
+        logger.warning("[analogy] draft: agent failed (%s: %s) — drafting without it",
+                       type(e).__name__, e)
+
+    _write_artifacts(Path(getattr(cfg, "log_dir", "") or "."), "draft", packet, res, corpus,
+                     extra={"stage": "draft", "branch_id": None, "parent_metric": None})
+    if res.report_md:
+        logger.info("[analogy] draft: %d mechanism(s) from %d quer%s in %d turns, %d chars, papers %s",
+                    len(res.report["mechanisms"]), len(res.queries),
+                    "y" if len(res.queries) == 1 else "ies", res.turns, len(res.report_md), res.paper_ids)
+    else:
+        logger.info("[analogy] draft: no report (%s) after %d turns, %d queries",
+                    res.reason or "?", res.turns, len(res.queries))
     return res.report_md
