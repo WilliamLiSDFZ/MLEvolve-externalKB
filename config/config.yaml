@@ -42,6 +42,16 @@ analogy:
   top_k: 10                     # default hits per search_papers call (the agent may ask up to 20)
   max_mechanisms: 3             # mechanisms kept per report
   report_char_budget: 8000      # cap on the injected report; whole mechanisms only
+  fulltext:
+    enabled: False             # opt in to reading original text of retrieved papers (D/E/F)
+    cache_dir: ""              # default: MLEvolve/cache/paper_fulltext; shared PVC on cluster
+    offline: False             # True = exact cached versions only, no network
+    max_papers: 3              # distinct open attempts per invocation, including failures
+    max_read_calls: 12
+    read_chars: 8000            # body characters returned per read_paper call
+    total_chars: 40000          # cumulative returned body characters; repeat reads count
+    open_timeout_seconds: 60.0 # includes lock wait, download and subprocess parsing
+    total_open_seconds: 150.0  # cumulative open time per invocation
 
 # ============================================================
 #  Code execution

@@ -1,0 +1,5 @@
+# Optional CPU paper reader. Install as a separate layer; no ML stack updates.
+pymupdf==1.28.0
+pymupdf4llm==1.28.0
+pymupdf_layout==1.28.0
+tabulate==0.9.0

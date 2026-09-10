@@ -56,6 +56,12 @@ install_reqs() {
 install_reqs requirements_base.txt
 install_reqs requirements_ml.txt
 
+# Optional original-paper reading; existing D/E/F defaults stay abstract-only.
+# FULLTEXT=1 bash k8s/setup-venv.sh installs the pinned CPU parser layer.
+if [ "${FULLTEXT:-0}" = "1" ]; then
+    install_reqs requirements_fulltext.txt
+fi
+
 # requirements_domain.txt is the union of EVERY mle-bench domain (vision, audio, NLP,
 # graph, geo, chem...). It is large, slow, and contains source-only packages that need a
 # compiler and a lot of RAM (e.g. jpegio, a 73MB sdist). For a single competition most of
@@ -89,9 +95,13 @@ rm -f "${FAILED_FILE}"
 
 # mle-bench (grading server imports mlebench.grade / mlebench.registry)
 if ! python -c "import mlebench" 2>/dev/null; then
-  echo "[setup] installing mle-bench"
-  pip install git+https://github.com/openai/mle-bench.git
+  MLEBENCH_REVISION="$(python utils/mlebench_patch.py --upstream-revision)"
+  echo "[setup] installing mle-bench at ${MLEBENCH_REVISION}"
+  pip install "git+https://github.com/openai/mle-bench.git@${MLEBENCH_REVISION}"
 fi
+# Existing installs must be checked too; importing mlebench cannot detect the AUC bug.
+python utils/mlebench_patch.py --apply
+python utils/verify_mlebench_grading.py
 
 python -c "import torch, mlebench; print('[setup] OK — torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 echo "[setup] Done. Jobs can now use VENV_DIR=${VENV_DIR}"

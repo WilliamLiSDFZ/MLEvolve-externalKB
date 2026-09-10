@@ -94,6 +94,12 @@ def write_kb_snapshot(cfg: Any) -> Path | None:
             "retrieval_mode": "analogy",
             "corpus": _corpus_summary(Path(corpus_path)),
         }
+        from engine.analogy.fulltext import options_from_config, parser_versions
+        import dataclasses
+        reading = options_from_config(acfg)
+        if reading.enabled:
+            snap["fulltext"] = {"config": dataclasses.asdict(reading), "parser": parser_versions(),
+                                "document_versions": "logs/analogy/*.fulltext.json (recorded when read)"}
         material = {"venues": snap["corpus"].get("venues"),
                     "records_sha1": snap["corpus"].get("records_sha1")}
         snap["digest"] = hashlib.sha1(

@@ -12,6 +12,7 @@ from rich.syntax import Syntax
 import shutup
 from rich.logging import RichHandler
 import logging
+from engine.analogy.fulltext import FullTextConfig
 
 # Lazy import to avoid circular dependency with engine.search_node
 # Journal and filter_journal are imported where needed via _get_journal_classes()
@@ -129,6 +130,7 @@ class AnalogyConfig:
     top_k: int = 10
     max_mechanisms: int = 3
     report_char_budget: int = 8000
+    fulltext: FullTextConfig = field(default_factory=FullTextConfig)
 
 
 @dataclass

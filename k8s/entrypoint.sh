@@ -36,6 +36,9 @@ if [ "${VIRTUAL_ENV:-}" != "${VENV_DIR}" ]; then
     echo "         rm -rf ${VENV_DIR} && bash ${REPO_DIR}/k8s/setup-venv.sh"
     exit 1
 fi
+if [ "${EXP_ID}" = "jigsaw-unintended-bias-in-toxicity-classification" ]; then
+    python "${REPO_DIR}/utils/mlebench_patch.py" --check
+fi
 python - <<'PY' || { echo "FATAL: venv is missing dependencies — rerun k8s/setup-venv.sh"; exit 1; }
 import sys
 # Report the REAL exception, not just the name we tried to import: everything is installed

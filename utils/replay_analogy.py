@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.analogy.agent import build_packet, build_task_packet, run_analogy_agent  # noqa: E402
 from engine.analogy.corpus import load_corpus  # noqa: E402
+from engine.analogy.fulltext import FullTextConfig  # noqa: E402
 
 
 def _prompt_text(node: dict) -> str:
@@ -134,6 +135,12 @@ def main() -> int:
     ap.add_argument("--packet-only", action="store_true", help="print the packet and stop")
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--max-mechanisms", type=int, default=3)
+    ap.add_argument("--fulltext", action="store_true", help="enable original-paper reading")
+    ap.add_argument("--fulltext-cache", default="", help="shared PDF/text cache directory")
+    ap.add_argument("--fulltext-offline", action="store_true", help="read cached versions only")
+    ap.add_argument("--fulltext-max-papers", type=int, default=3)
+    ap.add_argument("--fulltext-read-chars", type=int, default=8000)
+    ap.add_argument("--fulltext-total-chars", type=int, default=40000)
     args = ap.parse_args()
 
     mode = "draft" if args.draft else "improve"
@@ -217,7 +224,10 @@ def _run(packet: str, args, mode: str) -> int:
     print(f"\n=== running analogy agent: {llm.model} @ {llm.base_url}, corpus {corpus.digest} "
           f"({len(corpus)} papers) ===\n")
     res = run_analogy_agent(packet, corpus, llm, max_turns=args.max_turns,
-                            max_mechanisms=args.max_mechanisms, mode=mode)
+                            max_mechanisms=args.max_mechanisms, mode=mode,
+                            fulltext=FullTextConfig(enabled=args.fulltext, cache_dir=args.fulltext_cache,
+                                offline=args.fulltext_offline, max_papers=args.fulltext_max_papers,
+                                read_chars=args.fulltext_read_chars, total_chars=args.fulltext_total_chars))
     for t in res.trace:
         print(t, "\n")
     print("=== REPORT (as injected) ===\n")
@@ -231,6 +241,11 @@ def _run(packet: str, args, mode: str) -> int:
             ("\n```json\n" + json.dumps(res.report, ensure_ascii=False, indent=2) + "\n```\n"
              if res.report else ""), encoding="utf-8")
         print(f"wrote {args.out}")
+        if res.fulltext is not None:
+            Path(args.out).with_suffix(".fulltext.json").write_text(
+                json.dumps(res.fulltext, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif res.fulltext is not None:
+        print("WARNING: use --out to persist the full-text reading/version manifest", file=sys.stderr)
     return 0
 
 

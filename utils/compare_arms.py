@@ -37,6 +37,11 @@ import re
 import sys
 from pathlib import Path
 
+if __package__:
+    from .mlebench_patch import grading_metadata
+else:
+    from mlebench_patch import grading_metadata
+
 # ensembles_csv/top2ens-total_run_time8.48h.csv  ->  K=2, hours=8.48
 ENS_RE = re.compile(r"top(\d+)ens-total_run_time([\d.]+)h\.csv$")
 
@@ -70,6 +75,8 @@ def main():
     ap.add_argument("--data-dir", required=True, help="mle-bench data root (has <comp>/prepared/)")
     ap.add_argument("--baseline", default="A", help="label to compute deltas against")
     args = ap.parse_args()
+
+    print(f"grading provenance: {grading_metadata(args.competition)}")
 
     from mlebench.registry import registry
     from mlebench.utils import load_answers, read_csv

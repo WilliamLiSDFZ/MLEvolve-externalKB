@@ -31,6 +31,11 @@ import argparse
 import sys
 from pathlib import Path
 
+if __package__:
+    from .mlebench_patch import grading_metadata
+else:
+    from mlebench_patch import grading_metadata
+
 # Candidate names for the leaderboard's score column, in preference order. The bundled files
 # were dumped straight from `kaggle.api.competition_leaderboard_view`, whose row attributes
 # have shifted between client versions.
@@ -71,6 +76,8 @@ def main():
     ap.add_argument("--cutoff-hours", type=float, default=None,
                     help="drop files modified more than N hours after the earliest one")
     args = ap.parse_args()
+
+    print(f"grading provenance: {grading_metadata(args.competition)}")
 
     from mlebench.registry import registry
     from mlebench.utils import load_answers, read_csv
