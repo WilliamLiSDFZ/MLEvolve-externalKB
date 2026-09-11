@@ -143,7 +143,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_id)
 # model = ModernBertForMaskedLM.from_pretrained(model_id)  # for masked language modeling
 # model = ModernBertForTokenClassification.from_pretrained(model_id)  # for token classification/NER
 # mode…
-
+```
 
 ## Trace
 
