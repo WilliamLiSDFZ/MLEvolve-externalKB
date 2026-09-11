@@ -107,6 +107,7 @@ def run(agent, node: SearchNode) -> dict:
             "has_leakage": has_leakage,
             "reason": reason,
             "confidence": confidence,
+            "check_succeeded": True,
         }
     except Exception as e:
         logger.error(f"Data leakage check failed for node {node.id}: {e}")
@@ -114,4 +115,5 @@ def run(agent, node: SearchNode) -> dict:
             "has_leakage": False,
             "reason": f"Leakage check failed due to error: {str(e)}",
             "confidence": "low",
+            "check_succeeded": False,
         }

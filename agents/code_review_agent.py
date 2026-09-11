@@ -70,6 +70,16 @@ def run(agent, node: SearchNode) -> str:
     internet_clarification = get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", ""))
     if "Instructions" not in prompt:
         prompt["Instructions"] = {}
+    if getattr(getattr(agent.cfg, "candidate_runtime", None), "enabled", False):
+        from engine.candidate_runtime.prompt import instructions
+        prompt["Instructions"]["Code review guidelines"] = [line for line in prompt["Instructions"]["Code review guidelines"]
+            if "Execution time:" not in line and "Submission File Location" not in line]
+        prompt["Instructions"]["Required candidate runtime protocol"] = instructions()
+        prompt["Instructions"]["Runtime review"] = (
+            "Check fixed split before preprocessing, no held-out rows in training, real backward/optimizer updates before "
+            "session.step(), breaking all loops when requested, complete save/load callbacks and session.finish(). "
+            "Repair missing runtime integration. Each predict callback must preserve row order and restore model mode."
+        )
     if "Implementation guideline" in prompt["Instructions"]:
         prompt["Instructions"]["Implementation guideline"].extend(internet_clarification)
     else:

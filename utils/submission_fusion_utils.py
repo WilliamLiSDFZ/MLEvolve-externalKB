@@ -331,8 +331,20 @@ def ensemble(args):
     print(f"Experiment: {exp_name}")
     base_dir = f"{exp_name}/workspace/"
 
+    # Recovery also works after the agent was killed before writing its journal.
+    recovered_top_dir = None
+    if (Path(base_dir) / "candidate_results/contract/manifest.json").exists():
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from engine.candidate_runtime.integration import export_results
+        recovered_top_dir = export_results(base_dir, Path(exp_name) / "logs", cfg.max_candidates)
+        if recovered_top_dir is None:
+            raise ValueError("No eligible complete runtime snapshot; refusing stale legacy output")
+
     # Select solution directory
-    if args.use_llm_selection and os.path.exists(os.path.join(base_dir, "top_solution_llm/")):
+    if recovered_top_dir is not None:
+        top_dir = str(recovered_top_dir)
+    elif args.use_llm_selection and os.path.exists(os.path.join(base_dir, "top_solution_llm/")):
         top_dir = os.path.join(base_dir, "top_solution_llm/")
     else:
         top_dir = os.path.join(base_dir, "top_solution/")

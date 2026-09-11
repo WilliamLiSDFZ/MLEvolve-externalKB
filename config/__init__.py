@@ -13,6 +13,7 @@ import shutup
 from rich.logging import RichHandler
 import logging
 from engine.analogy.fulltext import FullTextConfig
+from engine.candidate_runtime.config import CandidateRuntimeConfig
 
 # Lazy import to avoid circular dependency with engine.search_node
 # Journal and filter_journal are imported where needed via _get_journal_classes()
@@ -107,6 +108,7 @@ class AgentConfig:
 class ExecConfig:
     timeout: int
     agent_file_name: str
+    max_parallel_run: int | None = None
 
 
 @dataclass
@@ -167,6 +169,7 @@ class Config(Hashable):
 
     coldstart: ColdstartConfig
     analogy: AnalogyConfig = field(default_factory=AnalogyConfig)
+    candidate_runtime: CandidateRuntimeConfig = field(default_factory=CandidateRuntimeConfig)
 
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)
@@ -295,6 +298,6 @@ def save_run(cfg: Config, journal):
     
     # save the best found solution
     best_node = journal.get_best_node()
-    if best_node is not None:
+    if best_node is not None and not getattr(getattr(cfg, "candidate_runtime", None), "enabled", False):
         with open(cfg.log_dir / "best_solution.py", "w") as f:
             f.write(best_node.code)

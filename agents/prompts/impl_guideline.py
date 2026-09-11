@@ -8,8 +8,14 @@ import humanize
 def get_impl_guideline_from_agent(agent):
     """Build implementation guideline from agent config."""
     tot_time_remaining = agent.acfg.time_limit - (time.time() - agent.start_time)
+    tot_time_remaining = max(0, min(tot_time_remaining, getattr(agent, "runtime_deadline", float("inf")) - time.time()))
     exec_timeout = int(min(agent.cfg.exec.timeout, tot_time_remaining))
-    return get_impl_guideline(
+    runtime = getattr(agent.cfg, "candidate_runtime", None)
+    if getattr(runtime, "enabled", False):
+        largest_budget = max(runtime.draft_budget_seconds or agent.cfg.exec.timeout,
+                             runtime.candidate_budget_seconds or agent.cfg.exec.timeout)
+        exec_timeout = int(min(exec_timeout, largest_budget))
+    result = get_impl_guideline(
         tot_time_remaining=tot_time_remaining,
         steps_remaining=agent.acfg.steps - agent.current_step,
         exec_timeout=exec_timeout,
@@ -17,6 +23,21 @@ def get_impl_guideline_from_agent(agent):
         k_fold_validation=getattr(agent.acfg, "k_fold_validation", 0),
         pretrain_model_dir=getattr(agent.cfg, "pretrain_model_dir", ""),
     )
+    if getattr(getattr(agent.cfg, "candidate_runtime", None), "enabled", False):
+        from engine.candidate_runtime.prompt import instructions
+        # Replace conflicting legacy output/logging rules; task semantics remain intact.
+        result["Implementation guideline"] = [line for line in result["Implementation guideline"]
+            if not any(text in line for text in ("MUST print:", "• Path:", "Print only 1 line per epoch",
+                                                 "metric as the last line", "COMPLETE training dataset"))]
+        result["Implementation guideline"].extend(instructions())
+        result["Implementation guideline"].append(
+            f"Stage budgets (including validation/export): draft/fusion_draft <= "
+            f"{humanize.naturaldelta(min(runtime.draft_budget_seconds or agent.cfg.exec.timeout, exec_timeout))}; "
+            f"debug/improve/evolution/fusion <= "
+            f"{humanize.naturaldelta(min(runtime.candidate_budget_seconds or agent.cfg.exec.timeout, exec_timeout))}. "
+            "The runtime's remaining() is authoritative after queueing and model loading."
+        )
+    return result
 
 
 def _format_time(time_in_sec):
@@ -36,7 +57,7 @@ def get_impl_guideline(
     impl_guideline = [
         f"**Resource Budget**: Time left ≈ {_format_time(tot_time_remaining)} | Steps left = {steps_remaining} | Max execution time per run = {humanize.naturaldelta(exec_timeout)}",
         "",
-        "**Note:** Code execution MUST complete within 9 hours (hard limit) — any solution exceeding this will be invalid. Within this constraint, prioritize performance and optimization.",
+        f"**Note:** Training, validation and test inference together must fit within the stated {humanize.naturaldelta(exec_timeout)} execution budget.",
         "🎯 **CRITICAL REQUIREMENTS** (Non-Negotiable):",
         "",
         "**1. Model Inference for ALL Predictions**",
@@ -77,6 +98,7 @@ def get_impl_guideline(
         "• AdamW: ❌ `from transformers import AdamW` (deprecated) → ✅ `from torch.optim import AdamW`",
         "",
         "🚫 **Execution Guidelines**:",
+        "• Each candidate sees at most one allocated CUDA GPU. Use cuda:0 (or CPU when CUDA is unavailable); preserve CUDA_VISIBLE_DEVICES and do not select host GPU IDs or launch multi-GPU training.",
         "• NO tqdm (not installed), NO verbose=1",
         "• Print only 1 line per epoch (minimize logging)",
         "• Use DataLoader with num_workers>=2 for speed",

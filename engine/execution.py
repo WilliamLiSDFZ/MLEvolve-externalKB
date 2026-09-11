@@ -30,7 +30,7 @@ def validate_executed_node(agent, node: SearchNode):
         logger.info(f"Node {node.id} did not produce a submission.csv")
         return
 
-    if node.metric.maximize and node.metric.value == 0.0:
+    if node.metric.maximize and node.metric.value == 0.0 and node.artifact_status != "scoreable":
         node.is_buggy = True
         node.metric = WorstMetricValue()
         node.analysis = _ZERO_METRIC_ANALYSIS
@@ -42,4 +42,5 @@ def validate_executed_node(agent, node: SearchNode):
     if hasattr(node, 'branch_id') and node.branch_id:
         if node.branch_id not in agent.branch_successful_nodes:
             agent.branch_successful_nodes[node.branch_id] = []
-        agent.branch_successful_nodes[node.branch_id].append(node)
+        if node not in agent.branch_successful_nodes[node.branch_id]:
+            agent.branch_successful_nodes[node.branch_id].append(node)

@@ -41,6 +41,11 @@ class SearchNode(DataClassJsonMixin):
     exc_type: str | None = field(default=None, kw_only=True)
     exc_info: dict | None = field(default=None, kw_only=True)
     exc_stack: list[tuple] | None = field(default=None, kw_only=True)
+    # Artifact usability is independent of the program's exit status and node stage.
+    execution_status: str | None = field(default=None, kw_only=True)
+    artifact_status: str | None = field(default=None, kw_only=True)
+    best_snapshot_id: str | None = field(default=None, kw_only=True)
+    artifact_metric: float | None = field(default=None, kw_only=True)
 
     # ---- evaluation ----
     analysis: str = field(default=None, kw_only=True)  # type: ignore

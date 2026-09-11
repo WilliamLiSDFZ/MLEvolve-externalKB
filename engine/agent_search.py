@@ -218,6 +218,9 @@ class AgentSearch:
                         else:
                             logger.info(f"Node {result_node.id} passed code review without changes")
 
+                    from engine.candidate_runtime.integration import register_candidate
+                    register_candidate(self.cfg, result_node)
+
                     if not execute_immediately:
                         logger.info(f"Node {result_node.id} code generated and reviewed, execution deferred")
                         result_node.pending_execution = True
@@ -281,7 +284,8 @@ class AgentSearch:
             best_metric = self.best_node.metric.value if (self.best_node and self.best_node.metric) else None
             logger.info(f"[step] {node.id} → {result_node.id}: metric={metric_value}, best={best_metric}")
 
-        if result_node and result_node.metric and result_node.metric.value is not None:
+        if result_node and ((result_node.metric and result_node.metric.value is not None)
+                            or result_node.artifact_status == "scoreable"):
             solution_manager.update_best_solution(self, result_node)
 
         self.current_step = len(self.journal)

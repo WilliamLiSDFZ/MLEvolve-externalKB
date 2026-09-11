@@ -1,11 +1,16 @@
 """Top-K candidate management and result persistence (update_top_candidates, save_top_candidates, get_branch_top_nodes, save_best_solution, update_best_solution, write_metric_file)."""
 
+from __future__ import annotations
+
 import shutil
 import logging
 from collections import defaultdict
-from typing import List
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, List
 
-from engine.search_node import SearchNode
+if TYPE_CHECKING:
+    from engine.search_node import SearchNode
 
 logger = logging.getLogger("MLEvolve")
 
@@ -59,29 +64,33 @@ def write_metric_file(filepath, node, metric_maximize: bool) -> None:
 
 def save_best_solution(agent, result_node, submission_file_path) -> None:
     """Save best solution code, submission, and meta to disk (thread-safe via agent.save_node_lock)."""
+    with agent.save_node_lock:
+        _save_best_solution_unlocked(agent, result_node, submission_file_path)
+
+
+def _save_best_solution_unlocked(agent, result_node, submission_file_path) -> None:
+    """Persist a candidate while the caller holds agent.save_node_lock."""
     best_solution_dir = agent.cfg.workspace_dir / "best_solution"
     best_submission_dir = agent.cfg.workspace_dir / "best_submission"
+    best_solution_dir.mkdir(exist_ok=True, parents=True)
+    best_submission_dir.mkdir(exist_ok=True, parents=True)
 
-    with agent.save_node_lock:
-        best_solution_dir.mkdir(exist_ok=True, parents=True)
-        best_submission_dir.mkdir(exist_ok=True, parents=True)
-
-        shutil.copy(
-            submission_file_path,
-            best_submission_dir / "submission.csv",
-        )
-
-        with open(best_solution_dir / "solution.py", "w") as f:
-            f.write(result_node.code)
-
-        with open(best_solution_dir / "node_id.txt", "w") as f:
-            f.write(str(result_node.id))
-
+    # Prepare every file before replacing any existing result. Staging on the same
+    # filesystem keeps each replacement atomic; the lock serializes all writers.
+    with TemporaryDirectory(prefix=".best-solution-", dir=agent.cfg.workspace_dir) as directory:
+        staged = Path(directory)
+        shutil.copy(submission_file_path, staged / "submission.csv")
+        (staged / "solution.py").write_text(result_node.code, encoding="utf-8")
+        (staged / "node_id.txt").write_text(str(result_node.id), encoding="utf-8")
         write_metric_file(
-            best_solution_dir / "metric.txt",
+            staged / "metric.txt",
             result_node,
             agent.metric_maximize,
         )
+
+        (staged / "submission.csv").replace(best_submission_dir / "submission.csv")
+        for name in ("solution.py", "node_id.txt", "metric.txt"):
+            (staged / name).replace(best_solution_dir / name)
 
 
 def update_top_candidates(agent, new_node: SearchNode) -> None:
@@ -221,6 +230,10 @@ def get_branch_top_nodes(agent, branch_id: int, top_k: int = 3) -> List[SearchNo
 
 def update_best_solution(agent, node):
     """Update top-K candidates and global best node."""
+    if getattr(getattr(agent.cfg, "candidate_runtime", None), "enabled", False):
+        from engine.candidate_runtime.integration import update_search_and_outputs
+        update_search_and_outputs(agent, node)
+        return
     if not node.metric or node.metric.value is None:
         return
 
@@ -229,17 +242,19 @@ def update_best_solution(agent, node):
     update_top_candidates(agent, node)
     save_top_candidates(agent)
 
-    if agent.best_node is None or agent.best_node.metric < node.metric:
-        if agent.best_node is None or node.is_valid is True:
-            agent.best_node = node
-            save_best_solution(agent, node, submission_file_path)
-            logger.info(f"[best] updated: node {node.id}, metric={node.metric.value}")
-        else:
-            logger.debug(f"Node {node.id} is invalid, skipped")
-    else:
-        if agent.best_node.is_valid is False:
-            agent.best_node = node
-            save_best_solution(agent, node, submission_file_path)
-            logger.info(f"[best] updated: node {node.id}, metric={node.metric.value}")
-        else:
-            logger.debug(f"Node {node.id} not the best (current best: {agent.best_node.id})")
+    # Selection and persistence must share one critical section. Otherwise an
+    # older winner can acquire the file lock last and overwrite a newer winner.
+    with agent.save_node_lock:
+        best_node = agent.best_node
+        if best_node is None or best_node.metric < node.metric:
+            if best_node is not None and node.is_valid is not True:
+                logger.debug(f"Node {node.id} is invalid, skipped")
+                return
+        elif best_node.is_valid is not False:
+            logger.debug(f"Node {node.id} not the best (current best: {best_node.id})")
+            return
+
+        _save_best_solution_unlocked(agent, node, submission_file_path)
+        # A failed save must not advertise an unsaved candidate as the best node.
+        agent.best_node = node
+        logger.info(f"[best] updated: node {node.id}, metric={node.metric.value}")

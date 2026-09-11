@@ -37,6 +37,12 @@ metric_direction_func_spec = FunctionSpec(
 
 
 def determine_metric_direction(agent) -> None:
+    if getattr(getattr(agent.cfg, "candidate_runtime", None), "enabled", False):
+        from engine.candidate_runtime.jigsaw import load_contract
+        contract = load_contract(agent.cfg.workspace_dir / "candidate_results/contract")
+        agent.metric_maximize = contract["maximize"]
+        agent.metric_maximize_reasoning = f"Fixed task contract: {contract['metric_version']}"
+        return
     logger.info("=" * 80)
     logger.info("Starting pre-determination of metric optimization direction...")
     logger.info("=" * 80)
@@ -363,6 +369,7 @@ def _check_data_leakage(agent, node: SearchNode, response: dict):
             logger.info(
                 f"Node {node.id} extreme value is justified: {leakage_result['reason']}"
             )
+    return leakage_result
 
 
 def _save_to_global_memory(agent, node: SearchNode):
@@ -375,6 +382,9 @@ def _save_to_global_memory(agent, node: SearchNode):
 
 
 def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
+    from engine.candidate_runtime.integration import enabled, parse_result
+    if enabled(agent.cfg):
+        return parse_result(agent, node, exec_result)
     max_retries = 3
     for retry_idx in range(max_retries):
         try:

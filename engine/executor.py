@@ -14,8 +14,10 @@ import time
 import traceback
 import subprocess
 from dataclasses import dataclass
-from multiprocessing import Lock
 from pathlib import Path
+from collections import deque
+
+from engine.gpu_devices import visible_gpu_devices
 
 import humanize
 from dataclasses_json import DataClassJsonMixin
@@ -34,6 +36,7 @@ class ExecutionResult(DataClassJsonMixin):
     exc_type: str | None
     exc_info: dict | None = None
     exc_stack: list[tuple] | None = None
+    execution_status: str | None = None
 
 
 
@@ -43,7 +46,7 @@ class Interpreter:
         working_dir: Path | str,
         timeout: int = 3600,
         agent_file_name: str = "runfile.py",
-        max_parallel_run: int = 3,
+        max_parallel_run: int | None = None,
         cfg=None,
         **kwargs,
     ):
@@ -54,49 +57,77 @@ class Interpreter:
             working_dir: working directory of the agent
             timeout: timeout per code execution (seconds)
             agent_file_name: base name for runfile (actual names are runfile_0.py, ...)
-            max_parallel_run: max concurrent execution slots
-            cfg: config (start_cpu_id, cpu_number, agent.search.parallel_search_num)
+            max_parallel_run: optional upper bound; at most one candidate per visible GPU
+            cfg: config (start_cpu_id, cpu_number); search workers do not set execution capacity
         """
         self.working_dir = Path(working_dir).resolve()
         assert self.working_dir.exists(), f"Working directory {self.working_dir} does not exist"
         self.timeout = timeout
-        self.max_parallel_run = (
-            cfg.agent.search.parallel_search_num if (cfg and getattr(cfg.agent.search, "parallel_search_num", None)) else max_parallel_run
-        )
+        self.cfg = cfg
+        self.run_deadline = float("inf")
+        if cfg is not None and getattr(getattr(cfg, "candidate_runtime", None), "enabled", False):
+            self.run_deadline = min(time.time() + cfg.agent.time_limit,
+                                    float(os.environ.get("MLEVOLVE_RUN_DEADLINE", "inf")))
+        self.gpu_devices = visible_gpu_devices()
+        if max_parallel_run is not None and max_parallel_run < 1:
+            raise ValueError("max_parallel_run must be positive or None")
+        self.start_cpu_id = int(cfg.start_cpu_id) if cfg else 0
+        self.cpu_number = int(cfg.cpu_number) if cfg else (os.cpu_count() or 1)
+        if self.cpu_number < 1:
+            raise ValueError("cpu_number must be positive")
+        available_cpus = (sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+                          else list(range(os.cpu_count() or 1)))
+        self.available_cpus = available_cpus[:self.cpu_number]
+        requested_slots = max_parallel_run or len(self.gpu_devices) or 1
+        capacity = len(self.gpu_devices) if self.gpu_devices else requested_slots
+        self.max_parallel_run = min(requested_slots, capacity, len(self.available_cpus))
+        if self.max_parallel_run < requested_slots:
+            logger.info("Execution concurrency capped from %s to %s by visible GPUs/CPUs",
+                        requested_slots, self.max_parallel_run)
         self.agent_file_name = [f"runfile_{i}.py" for i in range(self.max_parallel_run)]
         self.current_parallel_run = 0
         self.status_map = [0] * self.max_parallel_run
-        self.start_cpu_id = int(cfg.start_cpu_id) if cfg else 0
-        self.cpu_number = int(cfg.cpu_number) if cfg else 1
-        if self.cpu_number < self.max_parallel_run:
-            raise ValueError(
-                "The maximum level of parallelism exceeds the number of allocated CPU cores; "
-                "ensure that each process has at least one CPU core."
-            )
-        self.lock = Lock()
+        self.lock = threading.Condition()
+        self._slot_waiters = deque()
+        self._stopping = False
         self._procs_lock = threading.Lock()
         self._active_procs: dict[int, subprocess.Popen] = {}
+        logger.info("Execution slots=%s, visible GPU IDs=%s (one candidate per GPU)",
+                    self.max_parallel_run, self.gpu_devices or "CPU only")
+
+    @staticmethod
+    def _signal_process_tree(proc, sig):
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            elif proc.poll() is None:
+                proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
 
     def terminate_all_subprocesses(self) -> None:
         """Terminate all active subprocesses (for graceful Ctrl+C exit)."""
+        with self.lock:
+            self._stopping = True
+            self.lock.notify_all()
         with self._procs_lock:
             procs = list(self._active_procs.items())
-            self._active_procs.clear()
         for slot_id, proc in procs:
             try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+                self._signal_process_tree(proc, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                self._signal_process_tree(proc, signal.SIGKILL)
+                proc.wait()
             except Exception as e:
                 logger.warning(f"Error terminating subprocess slot {slot_id}: {e}")
 
     def check_current_status(self):
         """Check current parallel run number."""
-        return self.current_parallel_run < self.max_parallel_run
+        with self.lock:
+            return not self._stopping and self.current_parallel_run < self.max_parallel_run
 
     def isolate_submission_path(self, code: str, _id) -> str:
         """Per-process submission filename to avoid write conflicts."""
@@ -181,30 +212,43 @@ class Interpreter:
         process_id = None
 
         with self.lock:
-            self.current_parallel_run += 1
-            for idx in range(self.max_parallel_run):
-                if self.status_map[idx] == 0:
-                    self.status_map[idx] = 1
-                    process_id = idx
-                    logger.info(f"Assigned process_id: {process_id}")
-                    break
-                elif idx == self.max_parallel_run - 1:
-                    logger.info("reach max process parallel number")
-                    raise ValueError("reach max process parallel number")
+            ticket = object()
+            self._slot_waiters.append(ticket)
+            try:
+                self.lock.wait_for(lambda: self._stopping or (
+                    self._slot_waiters[0] is ticket and 0 in self.status_map))
+                if self._stopping:
+                    raise RuntimeError("Interpreter is stopping; candidate execution cancelled")
+                process_id = self.status_map.index(0)
+                self.status_map[process_id] = 1
+                self.current_parallel_run += 1
+            finally:
+                self._slot_waiters.remove(ticket)
+                self.lock.notify_all()
+            logger.info("Assigned execution slot %s to candidate %s", process_id, id)
 
         start_time = time.time()
         runfile_path = None
         proc = None
+        runtime_active = bool(self.cfg is not None and getattr(getattr(self.cfg, "candidate_runtime", None), "enabled", False))
+        deadline = start_time + self.timeout
+        execution_limit = self.timeout
+        result = None
         
         try:
-            cpu_number_per_session = max(1, int(self.cpu_number / self.max_parallel_run))
-            avail_cpus = sorted(os.sched_getaffinity(0))
-            start = process_id * cpu_number_per_session
-            cpu_set = set(avail_cpus[start:start + cpu_number_per_session])
-            if not cpu_set:
-                cpu_set = set(avail_cpus)
+            # Divide the actual CPU allowance, including any remainder, among execution slots.
+            start = process_id * len(self.available_cpus) // self.max_parallel_run
+            end = (process_id + 1) * len(self.available_cpus) // self.max_parallel_run
+            cpu_set = set(self.available_cpus[start:end])
             logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
-            pre_code = "import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
+            pre_code = ("import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
+                        if hasattr(os, "sched_setaffinity") else "")
+
+            spec_path = None
+            if runtime_active:
+                from engine.candidate_runtime.integration import begin_execution
+                spec_path, deadline = begin_execution(self.cfg, id, code, start_time, self.timeout, self.run_deadline)
+                execution_limit = deadline - start_time
 
             code = self.isolate_submission_path(code=code, _id=id)
             code = self.isolate_model_path(code=code, _id=id)
@@ -218,17 +262,22 @@ class Interpreter:
                 f.write(code)
 
             cmd = [sys.executable, str(runfile_path)]
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(run_wd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            with self._procs_lock:
-                self._active_procs[process_id] = proc
+            child_env = {**os.environ, "PYTHONUNBUFFERED": "1",
+                         "CUDA_VISIBLE_DEVICES": (self.gpu_devices[process_id]
+                                                  if self.gpu_devices else "")}
+            if spec_path is not None:
+                child_env["MLEVOLVE_CANDIDATE_SPEC"] = str(spec_path)
+                child_env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
+                                                                     child_env.get("PYTHONPATH", "")]))
+            with self.lock:
+                if self._stopping:
+                    raise RuntimeError("Interpreter stopped before candidate launch")
+                proc = subprocess.Popen(
+                    cmd, cwd=str(run_wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1, env=child_env, start_new_session=(os.name == "posix"),
+                )
+                with self._procs_lock:
+                    self._active_procs[process_id] = proc
 
             child_in_overtime = False
             exc_type = None
@@ -236,7 +285,7 @@ class Interpreter:
             exc_stack = []
             
             try:
-                stdout, stderr = proc.communicate(timeout=self.timeout)
+                stdout, stderr = proc.communicate(timeout=max(0.001, deadline - time.time()))
                 exec_time = time.time() - start_time
                 
                 if proc.returncode != 0:
@@ -310,11 +359,11 @@ class Interpreter:
             except subprocess.TimeoutExpired:
                 logger.warning("Subprocess timeout, sending SIGINT...")
                 try:
-                    proc.send_signal(signal.SIGINT)
+                    self._signal_process_tree(proc, signal.SIGINT)
                     stdout, stderr = proc.communicate(timeout=2)
                 except subprocess.TimeoutExpired:
                     logger.warning("Subprocess failed to terminate after SIGINT, killing...")
-                    proc.kill()
+                    self._signal_process_tree(proc, signal.SIGKILL)
                     stdout, stderr = proc.communicate()
                 
                 exec_time = time.time() - start_time
@@ -334,14 +383,15 @@ class Interpreter:
 
             if exc_type == "TimeoutError":
                 output.append(
-                    f"Execution time: TimeoutError: Execution exceeded the time limit of {humanize.naturaldelta(self.timeout)}"
+                    f"Execution time: TimeoutError: Execution exceeded the time limit of {humanize.naturaldelta(execution_limit)}"
                 )
             else:
                 output.append(
-                    f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(self.timeout)})."
+                    f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(execution_limit)})."
                 )
             
-            return ExecutionResult(output, exec_time, exc_type, exc_info, exc_stack)
+            result = ExecutionResult(output, exec_time, exc_type, exc_info, exc_stack)
+            return result
             
         except Exception as e:
             logger.error(f"Error in _run_subprocess: {e}")
@@ -349,13 +399,14 @@ class Interpreter:
             logger.error(error_trace)
             
             exec_time = time.time() - start_time if start_time else 0
-            return ExecutionResult(
+            result = ExecutionResult(
                 term_out=[f"Subprocess execution error: {str(e)}", error_trace],
                 exec_time=exec_time,
-                exc_type="RuntimeError",
+                exc_type="TimeoutError" if isinstance(e, TimeoutError) else "RuntimeError",
                 exc_info={"error": str(e)},
                 exc_stack=[],
             )
+            return result
         finally:
             if process_id is not None:
                 with self._procs_lock:
@@ -364,13 +415,15 @@ class Interpreter:
                 try:
                     if proc.poll() is None:
                         logger.warning(f"Subprocess {process_id} still running, terminating...")
-                        proc.terminate()
+                        self._signal_process_tree(proc, signal.SIGTERM)
                         try:
                             proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             logger.warning(f"Subprocess {process_id} failed to terminate, killing...")
-                            proc.kill()
+                            self._signal_process_tree(proc, signal.SIGKILL)
                             proc.wait()
+                    # A candidate's DataLoader/background children must not outlive its GPU slot.
+                    self._signal_process_tree(proc, signal.SIGKILL)
                 except Exception as e:
                     logger.warning(f"Error cleaning up subprocess {process_id}: {e}")
             
@@ -380,9 +433,15 @@ class Interpreter:
             except Exception as e:
                 logger.warning(f"Failed to remove runfile after subprocess execution: {e}")
             
+            if runtime_active and result is not None:
+                try:
+                    from engine.candidate_runtime.integration import end_execution
+                    end_execution(self.cfg, id, result, start_time, deadline)
+                except Exception:
+                    logger.exception("Failed to save candidate exit state; snapshots remain recoverable")
+
             with self.lock:
                 if process_id is not None:
                     self.status_map[process_id] = 0
                     self.current_parallel_run -= 1
-
-
+                    self.lock.notify_all()

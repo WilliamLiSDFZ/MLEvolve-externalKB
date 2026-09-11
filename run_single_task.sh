@@ -55,7 +55,11 @@ PY
 fi
 
 # ── Experiment settings (env-overridable for containerized runs, see k8s/) ──
-MEMORY_INDEX=${MEMORY_INDEX:-0}
+# Keep scheduler/container visibility unless the user explicitly selects devices.
+# An explicitly empty mask means CPU-only; comma-separated IDs expose multiple GPUs.
+if [ "${MEMORY_INDEX+x}" = x ]; then
+    export CUDA_VISIBLE_DEVICES="$MEMORY_INDEX"
+fi
 start_cpu=${start_cpu:-0}
 CPUS_PER_TASK=${CPUS_PER_TASK:-21}
 TIME_LIMIT_SECS=${TIME_LIMIT_SECS:-43200}   # 12 hours
@@ -94,7 +98,8 @@ DESC_FILE="${DESC_FILE:-${DATA_DIR}/description.md}"
 # EXTRA_RUN_ARGS: optional extra OmegaConf dotlist overrides (e.g. API keys injected
 # from a k8s Secret by k8s/entrypoint.sh: "agent.code.api_key=... agent.code.model=...").
 # Intentionally unquoted so it expands into separate words.
-CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-after=10s "${TIME_LIMIT_SECS}s" python run.py \
+export MLEVOLVE_RUN_DEADLINE=$(( $(date +%s) + TIME_LIMIT_SECS ))
+timeout --foreground --signal=TERM --kill-after=10s "${TIME_LIMIT_SECS}s" python run.py \
   exp_id="${EXP_ID}" \
   dataset_dir="${dataset_dir}" \
   data_dir="${DATA_DIR}" \

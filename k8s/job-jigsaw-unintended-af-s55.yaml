@@ -1,0 +1,275 @@
+# jigsaw-unintended-bias-in-toxicity-classification — A/F experiment, seed 55.
+# Based on job-jigsaw-unintended-af-s53.yaml; same image, LLM/proxy, resources,
+# GPU affinity and shared PVC. Both arms use the new candidate runtime protocol.
+# Run budget: 12 h. Candidate budgets: draft 90 min; debug/improve/evolution/fusion 120 min.
+# Budgets include validation and export. Each Job has one GPU and one execution slot.
+# Existing pretrained-model guidance is unchanged.
+#
+#   A  mlevolve-jubias-base-s55    no analogy
+#   F  mlevolve-jubias-anaf-s55    full-text analogy at the FIRST draft and improve nodes
+#
+#   kubectl apply  -f k8s/job-jigsaw-unintended-af-s55.yaml     # 2 Jobs / 2 GPUs
+#   kubectl delete -f k8s/job-jigsaw-unintended-af-s55.yaml
+#
+# F enables both analogy.draft and analogy.improve. Per invocation: 3 paper attempts,
+# 12 reading calls, 8,000 body characters per call / 40,000 total. The existing
+# 10 assistant turns and 8,000-character report budget are unchanged.
+# Requires the full-text reader and requirements_fulltext.txt on the shared PVC.
+# Sync the updated MLEvolve code (engine/candidate_runtime, pipeline and integrations)
+# to the Job checkout BEFORE applying. These YAMLs do not sync code or update live Pods.
+# Keep an isolated checkout if other experiments still use /workspace/MLEvolve.
+# See docs/candidate_runtime.md for activation and recovery details.
+# Trace: <run>/logs/analogy/*.md and *.fulltext.json (draft and improve).
+# Unlike S48-S50 arm E, F adds improve injection and full-text reading at both stages.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-base-s55
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: "15"
+    variant: kb-off
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: "15"
+        variant: kb-off
+        arm: a-baseline
+    spec:
+      restartPolicy: Never
+      # GPU type: only cards with >= 24 GB. Without this Nautilus hands out whatever is free — the
+      # 2026-09-03 batch landed on 8 GB / 11 GB / 22 GB cards and 64 of 65 nodes died, most of
+      # them CUDA OOM (see k8s/README.md "GPU type"). The list is deliberately wide (consumer
+      # 3090/4090 up to A100) so scheduling stays quick; high-end cards are allowed, not required.
+      #   kubectl get nodes -L nvidia.com/gpu.product --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090          # 24 GB
+                - NVIDIA-GeForce-RTX-4090          # 24 GB
+                - NVIDIA-TITAN-RTX                 # 24 GB
+                - NVIDIA-A10                       # 24 GB
+                - NVIDIA-RTX-A5000                 # 24 GB
+                - NVIDIA-L4                        # 24 GB
+                - Tesla-V100-SXM2-32GB             # 32 GB
+                - NVIDIA-A40                       # 48 GB
+                - NVIDIA-RTX-A6000                 # 48 GB
+                - NVIDIA-L40                       # 48 GB
+                - NVIDIA-L40S                      # 48 GB
+                - Quadro-RTX-8000                  # 48 GB
+                - NVIDIA-A100-PCIE-40GB            # 40 GB
+                - NVIDIA-A100-SXM4-40GB            # 40 GB
+                - NVIDIA-A100-80GB-PCIe            # 80 GB
+                - NVIDIA-A100-SXM4-80GB            # 80 GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-base-s55"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "93"               # port 5098
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=55
+            agent.time_limit=43200
+            exec.max_parallel_run=1
+            candidate_runtime.enabled=True
+            candidate_runtime.draft_budget_seconds=5400
+            candidate_runtime.candidate_budget_seconds=7200
+            candidate_runtime.first_validation_seconds=900
+            candidate_runtime.validation_interval_seconds=1800
+            candidate_runtime.export_interval_seconds=3600
+            candidate_runtime.smoke_steps=5
+            candidate_runtime.smoke_rows=128
+            candidate_runtime.finalization_reserve_seconds=900
+            candidate_runtime.finalization_safety_factor=1.5
+            candidate_runtime.validation_fraction=0.05
+            candidate_runtime.keep_snapshots=2
+            analogy.enabled=False
+            analogy.fulltext.enabled=False
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across both arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-anaf-s55
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: "15"
+    variant: analogy-draft-improve
+    arm: f-analogy-draft-improve
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400     # 24 h wall clock, and it counts Pending time (see README)
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: "15"
+        variant: analogy-draft-improve
+        arm: f-analogy-draft-improve
+    spec:
+      restartPolicy: Never
+      # GPU type: only cards with >= 24 GB. Without this Nautilus hands out whatever is free — the
+      # 2026-09-03 batch landed on 8 GB / 11 GB / 22 GB cards and 64 of 65 nodes died, most of
+      # them CUDA OOM (see k8s/README.md "GPU type"). The list is deliberately wide (consumer
+      # 3090/4090 up to A100) so scheduling stays quick; high-end cards are allowed, not required.
+      #   kubectl get nodes -L nvidia.com/gpu.product --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090          # 24 GB
+                - NVIDIA-GeForce-RTX-4090          # 24 GB
+                - NVIDIA-TITAN-RTX                 # 24 GB
+                - NVIDIA-A10                       # 24 GB
+                - NVIDIA-RTX-A5000                 # 24 GB
+                - NVIDIA-L4                        # 24 GB
+                - Tesla-V100-SXM2-32GB             # 32 GB
+                - NVIDIA-A40                       # 48 GB
+                - NVIDIA-RTX-A6000                 # 48 GB
+                - NVIDIA-L40                       # 48 GB
+                - NVIDIA-L40S                      # 48 GB
+                - Quadro-RTX-8000                  # 48 GB
+                - NVIDIA-A100-PCIE-40GB            # 40 GB
+                - NVIDIA-A100-SXM4-40GB            # 40 GB
+                - NVIDIA-A100-80GB-PCIe            # 80 GB
+                - NVIDIA-A100-SXM4-80GB            # 80 GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-anaf-s55"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: SERVER_ID
+          value: "94"               # port 5099
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=55
+            agent.time_limit=43200
+            exec.max_parallel_run=1
+            candidate_runtime.enabled=True
+            candidate_runtime.draft_budget_seconds=5400
+            candidate_runtime.candidate_budget_seconds=7200
+            candidate_runtime.first_validation_seconds=900
+            candidate_runtime.validation_interval_seconds=1800
+            candidate_runtime.export_interval_seconds=3600
+            candidate_runtime.smoke_steps=5
+            candidate_runtime.smoke_rows=128
+            candidate_runtime.finalization_reserve_seconds=900
+            candidate_runtime.finalization_safety_factor=1.5
+            candidate_runtime.validation_fraction=0.05
+            candidate_runtime.keep_snapshots=2
+            analogy.enabled=True
+            analogy.draft=True
+            analogy.improve=True
+            analogy.corpus_path=/workspace/Agentic_Knowledge_Base/output/paper_corpus
+            analogy.fulltext.enabled=True
+            analogy.fulltext.cache_dir=/workspace/MLEvolve/cache/paper_fulltext
+            analogy.fulltext.offline=False
+            analogy.fulltext.max_papers=3
+            analogy.fulltext.max_read_calls=12
+            analogy.fulltext.read_chars=8000
+            analogy.fulltext.total_chars=40000
+            analogy.fulltext.open_timeout_seconds=60.0
+            analogy.fulltext.total_open_seconds=150.0
+        # Route the agent through the shared proxy. These two are not secrets; the key is.
+        # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"     # verified: max_completion_tokens, tools and streaming all work
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy  # must provide LLM_API_KEY
+        resources:                 # identical across both arms
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

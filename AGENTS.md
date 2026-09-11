@@ -51,7 +51,7 @@ Notable behavioral switches in `config.yaml` — many double as ablation toggles
 
 ## Architecture
 
-**Entry & loop (`run.py`).** Loads config, builds one `AgentSearch` (the coordinator) and one `Interpreter`. Phase 1 generates `agent.initial_drafts` drafts sequentially (code only, execution deferred). Phase 2 runs a `ThreadPoolExecutor` pipeline sized to `interpreter.max_parallel_run`: it executes deferred drafts and submits new `agent.step()` tasks until `agent.steps` nodes exist, calling `save_run` after each completion. SIGINT terminates subprocesses and cancels futures. `__init__.py` exposes a thin programmatic `Experiment` wrapper around the same pieces.
+**Entry & loop (`run.py`, `engine/pipeline.py`).** Loads config, builds one `AgentSearch` and one `Interpreter`. Initial drafts are generated sequentially and immediately queued for raw execution; parsing/grading/tree and global-memory updates wait until all initial drafts are generated, preserving their pending-result context. Search workers use `agent.search.parallel_search_num`; execution capacity is independent (`exec.max_parallel_run: null` auto-detects one slot per visible CUDA device, CPU-only defaults to one). Each candidate sees only its assigned GPU. Full slots queue callers. SIGINT/SIGTERM stop queued work and active candidate process groups. See `docs/execution_pipeline.md`; CPU-only regression command: `python utils/verify_execution_pipeline.py`. `__init__.py` exposes a thin sequential programmatic `Experiment` wrapper around the same agent/interpreter.
 
 **Search engine (`engine/`)** — the coordinator delegates to focused modules rather than holding all logic:
 - `agent_search.py` — `AgentSearch.step()` → `_run_single_step()`. **This is the dispatch heart:** given a selected parent node it picks the agent by node state — root → `draft_agent` (or `aggregation_agent` once the draft limit is hit), buggy/invalid → `debug_agent`, healthy → `improve_agent`, *unless* the branch is stagnant after ≥ half the time budget, in which case `evolution_agent` (intra-branch) or `fusion_agent` (cross-branch) fires per `fusion_vs_evolution_prob`. Generated code is run through `code_review_agent` before execution, then `result_parse_agent` + `execution.validate_executed_node` after.
@@ -67,6 +67,14 @@ Notable behavioral switches in `config.yaml` — many double as ablation toggles
 - `validation/` — `format_server.py` is a standalone Flask app (started by `launch_server.sh`) that wraps mle-bench grading; `format_client.py` calls it; `quality_check.py` does submission content/format checks and LLM-assisted fixes.
 
 Node `stage` values: `root`, `draft`, `fusion_draft`, `improve`, `debug`, `evolution`, `fusion`. Nodes are grouped into branches (`branch_id`); much of the search logic is per-branch.
+
+**Candidate runtime (`engine/candidate_runtime/`, opt-in).** `candidate_runtime.enabled`
+adds fixed public-data validation, cooperative budgets, immutable model/prediction snapshots
+and recovery independent of journal completion. First adapter: Jigsaw Unintended Bias.
+Snapshots are not new search nodes. Execution errors still route to debug while already
+verified snapshots remain eligible for final submissions. See `docs/candidate_runtime.md`;
+run `python utils/verify_candidate_runtime.py`. Default off; do not enable it silently for
+old tasks. Keep configuration keys in both CandidateRuntimeConfig and config.yaml.
 
 **Agents (`agents/`).** One module per stage (`draft_agent`, `improve_agent`, `debug_agent`, `evolution_agent`, `fusion_agent`, `aggregation_agent`, `code_review_agent`, `result_parse_agent`, `data_leakage_agent`); each exposes a `run(agent, ...)` taking the `AgentSearch` instance. `result_parse_agent` also determines metric direction (minimize vs maximize) up front. Subpackages:
 - `coder/` — three generation strategies dispatched adaptively: `base_coder` (single-shot plan+code), `stepwise_coder` (multi-agent data-prep → model → training), `diff_coder` (SEARCH/REPLACE patch application).
