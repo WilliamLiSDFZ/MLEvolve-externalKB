@@ -39,6 +39,19 @@ def pairwise_auc(labels, values):
     return np.mean((positive[:, None] > negative).astype(float) + 0.5 * (positive[:, None] == negative))
 
 
+class Clock:
+    """Advance callback wall time without sleeping or mocking result publication."""
+
+    def __init__(self):
+        self.value = time.time()
+
+    def time(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -103,6 +116,240 @@ class RuntimeTests(unittest.TestCase):
         self.store.write_execution(name, status="completed", elapsed_seconds=session.elapsed())
         return session, model
 
+    def timed_session(self, prediction_cost, budget=5400, save_cost=20, load_cost=15):
+        self.runtime.smoke_steps = 5
+        self.runtime.first_validation_seconds = 900
+        self.runtime.validation_interval_seconds = 1800
+        self.runtime.export_interval_seconds = 3600
+        self.runtime.finalization_reserve_seconds = 900
+        session, model = self.session()
+        clock = Clock()
+        timer = patch("engine.candidate_runtime.session.time", clock)
+        timer.start()
+        self.addCleanup(timer.stop)
+        session.training_started = session.spec["started_at"] = clock.time()
+        session.spec["deadline"] = clock.time() + budget
+        calls = {"validation": [], "test": [], "save": [], "load": []}
+
+        def prediction(kind, callback):
+            def run(indices):
+                calls[kind].append(indices.copy())
+                clock.advance(prediction_cost(kind, len(indices), len(calls[kind])))
+                return callback(indices)
+            return run
+
+        def checkpoint(kind, callback, cost):
+            def run(path):
+                calls[kind].append(path)
+                clock.advance(cost)
+                return callback(path)
+            return run
+
+        session.bind(predict_validation=prediction("validation", session.predict_validation),
+                     predict_test=prediction("test", session.predict_test),
+                     save_checkpoint=checkpoint("save", session.save_checkpoint, save_cost),
+                     load_checkpoint=checkpoint("load", session.load_checkpoint, load_cost))
+        return session, model, clock, calls
+
+    def test_cold_start_and_fixed_inference_cost_do_not_stop_after_five_steps(self):
+        session, model, clock, calls = self.timed_session(
+            lambda kind, rows, call: (90 if call == 1 else 0) + 30 + rows * 0.05)
+        deadline = session.spec["deadline"]
+        for _ in range(6):
+            model["weight"][0] += 0.01
+            clock.advance(2)
+            self.assertFalse(session.step())
+        self.assertAlmostEqual(session.validation_seconds, 30 + len(session.answers) * 0.05, places=4)
+        self.assertAlmostEqual(session.test_seconds, 34, places=4)
+        self.assertEqual(session.reserve_seconds(), 900)
+        self.assertAlmostEqual(session.training_seconds(), 12)
+        self.assertGreater(session.elapsed(), 300)
+        self.assertIsNone(session.best_validation_score)  # smoke never becomes a ranked score
+        self.assertEqual(session.spec["deadline"], deadline)
+        for kind, count in (("validation", len(session.answers)), ("test", len(session.test_ids))):
+            self.assertEqual([len(i) for i in calls[kind]], [16, 16, 64])
+            self.assertEqual(calls[kind][0][0], 0)
+            self.assertEqual(calls[kind][0][-1], count - 1)
+
+    def test_prediction_timing_flat_and_noisy_costs_stay_finite(self):
+        session, _, clock, _ = self.timed_session(lambda *args: 0)
+        for durations, expected in [([90, 30, 30], 30), ([90, 31, 30], 30 * 210 / 64),
+                                    ([90, 1, 8], 8 * 210 / 64)]:
+            with self.subTest(durations=durations):
+                times = iter(durations)
+                def callback(indices):
+                    clock.advance(next(times))
+                    return np.full(len(indices), 0.5)
+                estimate, timing = session._estimate_prediction(callback, 210)
+                self.assertAlmostEqual(estimate, expected)
+                self.assertTrue(timing["calibrated"])
+
+    def test_small_partition_and_deadline_skip_optional_timing_calls(self):
+        session, _, clock, _ = self.timed_session(lambda *args: 0)
+        calls = []
+        def callback(indices):
+            calls.append(indices.copy())
+            clock.advance(5)
+            return np.full(len(indices), 0.5)
+        estimate, _ = session._estimate_prediction(callback, 10)
+        self.assertEqual(estimate, 5)
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_array_equal(calls[0], np.arange(10))
+        # Cross the minimum reserve during warmup, then during the warmed small call.
+        for available, expected_calls in [(902, 1), (907, 2)]:
+            calls.clear()
+            session.spec["deadline"] = clock.time() + available
+            deadline = session.spec["deadline"]
+            estimate, timing = session._estimate_prediction(callback, 210)
+            self.assertEqual(len(calls), expected_calls)
+            self.assertFalse(timing["calibrated"])
+            self.assertGreater(estimate, 0)
+            self.assertEqual(session.spec["deadline"], deadline)
+
+    def test_provisional_overestimate_recalibrates_and_resumes_current_model(self):
+        # Small calls have costly per-row setup that full-partition vectorization avoids.
+        session, model, clock, calls = self.timed_session(
+            lambda kind, rows, call: rows * 8 if rows <= 64 else 100)
+        model["weight"][:] = [0.3, 0.7]
+        for _ in range(5):
+            clock.advance(2)
+            self.assertFalse(session.step())
+        self.assertFalse(session.closed)
+        self.assertEqual(session.last_validation_steps, 5)
+        self.assertEqual(session.validation_seconds, 100)
+        self.assertEqual(session.export_seconds, 215)  # reload + full validation + test
+        self.assertEqual(session.reserve_seconds(), 900)
+        self.assertEqual(len(calls["save"]), 1)
+        self.assertEqual(len(calls["load"]), 1)
+        self.assertEqual(len(self.store.valid_snapshots("n1")[0]), 1)
+        np.testing.assert_array_equal(model["weight"], [0.3, 0.7])
+        events = [json.loads(line) for line in
+                  (session.store.metadata_dir("n1") / "events.jsonl").read_text().splitlines()]
+        recalibrated = next(e for e in events if e["event"] == "budget_recalibrated")
+        self.assertTrue(recalibrated["continue_training"])
+        self.assertGreater(recalibrated["previous_reserve_seconds"], 5400)
+        model["weight"][0] += 0.1
+        clock.advance(2)
+        self.assertFalse(session.step())
+        self.assertEqual(session.steps, 6)
+        self.assertAlmostEqual(model["weight"][0], 0.4)
+        self.assertEqual(len(calls["load"]), 1)
+
+    def test_real_expensive_cycle_stops_once_with_complete_result(self):
+        session, _, clock, calls = self.timed_session(
+            lambda kind, rows, call: rows * 8 if rows <= 64 else 1000)
+        for _ in range(4):
+            clock.advance(2)
+            self.assertFalse(session.step())
+        clock.advance(2)
+        self.assertTrue(session.step())
+        result = session.finish()
+        self.assertEqual(result["reason"], "budget_exhausted")
+        self.assertEqual(result["optimizer_steps"], 5)
+        self.assertEqual(result["selected_optimizer_steps"], 5)
+        self.assertEqual([len(i) for i in calls["validation"]], [16, 16, 64, 210, 210])
+        self.assertEqual([len(i) for i in calls["test"]], [16, 16, 64, 80])
+        self.assertEqual(len(calls["save"]), 1)
+        self.assertTrue(Path(result["submission_path"]).is_file())
+        self.assertGreater(session.remaining(), 0)
+        counts = {k: len(v) for k, v in calls.items()}
+        self.assertEqual(session.finish(), result)
+        self.assertEqual({k: len(v) for k, v in calls.items()}, counts)
+
+    def test_validation_and_export_do_not_advance_training_interval(self):
+        session, model, clock, calls = self.timed_session(
+            lambda kind, rows, call: 300 if kind == "validation" else 1800, budget=30000)
+        for _ in range(5):
+            clock.advance(2)
+            self.assertFalse(session.step())
+        # Smoke alone took 105 minutes, but first formal validation still needs 15 min training.
+        self.assertEqual(session.training_seconds(), 10)
+        self.assertIsNone(session.best)
+        clock.advance(890)
+        self.assertFalse(session.step())
+        self.assertEqual(session.last_validation_steps, 6)
+        self.assertEqual(session.training_seconds(), 900)
+        before = len(calls["validation"])
+        # Export takes >30 minutes. One subsequent training step must NOT trigger validation.
+        clock.advance(1)
+        self.assertFalse(session.step())
+        self.assertEqual(len(calls["validation"]), before)
+        clock.advance(1798)
+        self.assertFalse(session.step())
+        self.assertEqual(len(calls["validation"]), before)
+        model["weight"][:] = [1, 0]
+        clock.advance(1)
+        self.assertFalse(session.step())
+        self.assertEqual(session.last_validation_steps, 9)
+        self.assertEqual(len(calls["validation"]), before + 1)
+        # The older published model was not reloaded over the newer training state.
+        np.testing.assert_array_equal(model["weight"], [1, 0])
+
+    def test_actual_cycle_can_end_budget_at_same_optimizer_update(self):
+        session, _, clock, calls = self.timed_session(
+            lambda kind, rows, call: 1 if rows <= 64 else 1100)
+        for _ in range(4):
+            clock.advance(2)
+            self.assertFalse(session.step())
+        clock.advance(900)
+        self.assertTrue(session.step())
+        result = session.finish()
+        self.assertEqual(result["reason"], "budget_exhausted")
+        self.assertEqual(result["optimizer_steps"], 5)
+        self.assertEqual(len(calls["validation"]), 5)
+        self.assertEqual(len(calls["test"]), 4)
+        self.assertEqual(len(self.store.valid_snapshots("n1")[0]), 1)
+
+    def test_finish_returns_verified_immutable_result_and_is_idempotent(self):
+        session, _ = self.session()
+        self.assertIsNone(session.best_validation_score)
+        self.assertIsNone(session.best_score)
+        session.step()
+        with patch.object(session, "predict_validation", side_effect=AssertionError("duplicate validation")), \
+             patch.object(session, "predict_test", side_effect=AssertionError("duplicate inference")):
+            result = session.finish()
+            again = session.finish()
+        self.assertEqual(result, again)
+        self.assertIsNot(result, again)
+        manifest = self.store.verify("n1", Path(result["submission_path"]).parent)
+        self.assertEqual(result["checkpoint_id"], manifest["checkpoint_id"])
+        self.assertEqual(result["snapshot_id"], manifest["snapshot_id"])
+        self.assertAlmostEqual(result["best_validation_score"], manifest["metric"])
+        self.assertEqual(session.best_score, result["best_validation_score"])
+        self.assertEqual(session.best_validation_score, session.best_score)
+        with self.assertRaises(AttributeError):
+            session.best_validation_score = 1.0
+        self.assertTrue(Path(result["validation_path"]).is_file())
+        self.assertEqual(read_json(session.directory / "worker_finished.json"), result)
+        result["best_validation_score"] = -1
+        self.assertEqual(session.finish(), again)
+
+    def test_finish_reports_selected_checkpoint_steps_instead_of_latest_steps(self):
+        session, model, clock, calls = self.timed_session(lambda *args: 1, budget=20000)
+        model["weight"][:] = [1, 0]
+        clock.advance(901)
+        session.step()
+        first = session.best["metric"]
+        model["weight"][:] = [0, 1]
+        clock.advance(1801)
+        session.step()
+        self.assertEqual(session.last_validation_steps, 2)
+        count = len(calls["validation"])
+        result = session.finish()
+        self.assertEqual(len(calls["validation"]), count)
+        self.assertEqual(result["optimizer_steps"], 2)
+        self.assertEqual(result["selected_optimizer_steps"], 1)
+        self.assertEqual(result["best_validation_score"], first)
+        self.assertEqual(self.store.verify("n1", Path(result["submission_path"]).parent)["metric"], first)
+
+    def test_shared_prompt_documents_result_api(self):
+        from engine.candidate_runtime.prompt import instructions
+        prompt = " ".join(instructions())
+        for api in ["result = session.finish()", "result['best_validation_score']", "result['submission_path']",
+                    "session.best_validation_score", "session.best_score"]:
+            self.assertIn(api, prompt)
+        self.assertIn("without extra inference", prompt)
+
     def test_official_metric_matches_independent_pairwise_oracle(self):
         answers = pd.read_csv(self.ws / "candidate_results/contract/validation.csv")
         rng = np.random.default_rng(7)
@@ -143,7 +390,7 @@ class RuntimeTests(unittest.TestCase):
         session.step()
         original = self.store.valid_snapshots("n1")[0][0]
         model["weight"][:] = [1.0, 0.0]
-        session.last_validation = 0
+        session.last_validation_training_seconds = -1e6
         session.last_export = 0
         def fail_predict(indices):
             raise RuntimeError("test inference failed after checkpoint was saved")
@@ -161,7 +408,8 @@ class RuntimeTests(unittest.TestCase):
         session.step()
         old = session.published_checkpoint
         model["weight"][:] = [1.0, 0.0]
-        session.last_validation = session.last_export = 0
+        session.last_validation_training_seconds = -1e6
+        session.last_export = 0
         session.step()
         new = session.published_checkpoint
         self.assertNotEqual(old, new)
@@ -208,7 +456,8 @@ class RuntimeTests(unittest.TestCase):
         session, model = self.session()
         session.step()
         model["weight"][:] = [1.0, 0.0]
-        session.last_validation = session.last_export = 0
+        session.last_validation_training_seconds = -1e6
+        session.last_export = 0
         session.step()
         self.store.write_execution("n1", status="timeout", elapsed_seconds=123.5)
         export_results(self.ws)
@@ -266,9 +515,19 @@ class RuntimeTests(unittest.TestCase):
         return interpreter.run(code, "child")
 
     def test_real_training_subprocess_normal_completion(self):
-        result = self.run_child("\ns.finish()\n")
+        result = self.run_child(RESULT_CONSUMER)
         self.assertIsNone(result.exc_type, "".join(result.term_out))
         self.assertEqual(result.execution_status, "completed")
+        self.assertTrue(self.store.valid_snapshots("child")[0])
+
+    def test_real_training_subprocess_budget_stop_consumes_same_result(self):
+        self.runtime.finalization_reserve_seconds = 30
+        result = self.run_child(RESULT_CONSUMER)
+        self.assertIsNone(result.exc_type, "".join(result.term_out))
+        self.assertEqual(result.execution_status, "budget_exhausted")
+        saved = read_json(self.store.candidate_dir("child") / "worker_finished.json")
+        self.assertEqual(saved["optimizer_steps"], 1)
+        self.assertEqual(saved["selected_optimizer_steps"], 1)
         self.assertTrue(self.store.valid_snapshots("child")[0])
 
     def test_real_subprocess_crash_after_publication(self):
@@ -471,6 +730,17 @@ for i in range(5):
 # Protocol hook exists, but this branch is deliberately false in crash/kill tests.
 if False:
     s.finish()
+'''
+
+
+RESULT_CONSUMER = '''
+from pathlib import Path
+result = s.finish()
+assert result == s.finish()
+assert result["best_validation_score"] == s.best_validation_score == s.best_score
+assert 0 <= result["best_validation_score"] <= 1
+assert Path(result["submission_path"]).is_file()
+assert Path(result["validation_path"]).is_file()
 '''
 
 

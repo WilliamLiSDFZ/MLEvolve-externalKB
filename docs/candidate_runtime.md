@@ -25,10 +25,31 @@ Each budget includes model loading, smoke checks, training, validation, checkpoi
 I/O and full test inference. The outer run deadline also bounds queued candidates;
 waiting does not consume an independent per-candidate execution allowance but does
 consume the run's total time. Training stops with a reserve of at least 900 seconds,
-or 1.5 times estimated remaining validation/export cost if larger. The estimate is
-updated from actual callbacks rather than GPU model or memory size. A hard timeout
-still ends non-cooperative or stuck candidates. One candidate retains one GPU slot
-during all its training and inference work.
+or 1.5 times estimated remaining validation/export cost if larger. Before the first
+export, this cost is two full validations plus test inference and checkpoint saving.
+Afterwards it uses measured validation, saving and the complete export duration
+(checkpoint reload, verification inference, test prediction, publication and pruning).
+The estimate depends on callback timings, not GPU model or memory size. A hard
+timeout still ends non-cooperative or stuck candidates. One candidate retains one
+GPU slot during all its training and inference work.
+
+Smoke timing first warms each prediction callback, then measures two subset sizes
+(up to 128 and 512 rows by default). It estimates fixed invocation overhead and
+per-row cost separately; the cold call is not extrapolated across the dataset.
+Samples are evenly spaced across each partition. Negative slope/intercept estimates
+fall back to the larger warmed sample's per-row rate. For a partition no larger than
+the smoke sample, one full-partition call suffices. Optional timing calls are skipped
+when remaining time reaches the minimum reserve. Every call still checks prediction
+shape and finite probabilities, and all its time consumes the absolute deadline.
+
+Small samples can remain misleading. If their estimate requests a budget stop before
+any formal validation, and more than the minimum reserve remains, the worker first
+validates and publishes one complete result. It then recalculates the reserve from
+actual full-cycle timings and resumes training if time allows. This calibration only
+reloads the current checkpoint, preserving the model/optimizer relationship. A
+`budget_recalibrated` event records the old/new reserve and the decision. Once actual
+costs require finalization, or the minimum reserve has been reached, it closes. No
+deadline is extended; a blocking callback can still hit the outer hard timeout.
 
 ## Generated-code contract
 
@@ -57,22 +78,31 @@ for epoch in range(epochs):
             break
     if stop:
         break
-session.finish()
+result = session.finish()                   # also safe after step() returned True
+# Optional consumers use the saved result; no extra inference is needed.
+score = result["best_validation_score"]
+submission_path = result["submission_path"]
 ```
 
 Predict callbacks must preserve the requested row order, use identical validation
-and test preprocessing, and restore train/eval mode. Smoke calls request a small
-slice; full validation/export calls request the whole partition. Save callbacks
+and test preprocessing, use inference mode and restore the previous train/eval mode.
+Smoke/timing calls request arbitrary positional subsets; full validation/export calls
+request the whole partition. Save callbacks
 include weights, model configuration, tokenizer and fitted transforms. Load callbacks
 restore the **existing** model so optimizer parameter references stay valid.
 Checkpoint directories remain immutable after publication. The runtime checks that
 reloading reproduces validation predictions before exporting test predictions.
 
-The worker runs the smoke check after five real training updates, including the
-candidate's actual backward path. It checks up to 128 validation/test predictions.
+The worker normally runs the smoke check after five real training updates, including
+the candidate's actual backward path; an earlier validation/finalization also runs it.
 Smoke scores are never ranked. Formal validation starts after approximately 15
-minutes of training, then at most every 30 minutes, less frequently if validation
-itself is expensive. It does not wait for an epoch boundary. A partial epoch is
+minutes of training, then at most every 30 training minutes (or three times the most
+recent full-validation duration, if longer). The training interval excludes smoke,
+validation, saving and export time. These phases still consume the total execution
+budget: a slow export cannot make another validation immediately due after one update.
+The budget is checked again after each formal validation/export cycle, and closing
+at that same update reuses its validation rather than repeating it.
+It does not wait for an epoch boundary. A partial epoch is
 allowed; the exact update count is recorded. A blocking estimator `fit` needs its
 own callback/time limit to cooperate; AST checks cannot make an arbitrary training
 function interruptible or prove that callbacks were called correctly.
@@ -83,6 +113,27 @@ or during finalization. Continuing-training exports only load the current best
 model state; finalization may load an older best checkpoint. An unfinished export
 never replaces a previously complete snapshot. If the process dies before its first
 complete export, it still has no usable submission.
+
+`finish()` returns a dictionary for both normal and cooperative budget exits:
+
+| Field | Meaning |
+| --- | --- |
+| `best_validation_score`, `maximize` | Full-validation score and direction of the selected saved checkpoint |
+| `submission_path`, `validation_path` | Absolute paths to complete CSVs in that immutable snapshot |
+| `node_id`, `checkpoint_id`, `snapshot_id` | Result provenance |
+| `selected_optimizer_steps` | Updates completed at the selected checkpoint |
+| `optimizer_steps` | Total updates completed by this candidate, including work after that checkpoint |
+| `reason` | `completed` or `budget_exhausted` |
+| `version`, `finished_at`, `elapsed_seconds` | Result schema version (1), finish timestamp and total execution duration |
+
+The same metadata is stored in `worker_finished.json`. Repeated `finish()` calls
+return a copy of the same result with no further validation, export or score printing.
+The session itself prints `Final Validation Score`. Before finalization,
+`session.best_validation_score` and the compatibility alias `session.best_score` are
+read-only properties: `None` before formal validation, then the best saved full
+validation score (which may still await export). Generated code and the reviewer
+share this contract. Do not guess other attributes, treat the return value as a scalar,
+or run another prediction/metric pass after finishing.
 
 ## Validation and metric
 
@@ -182,8 +233,15 @@ Tests use synthetic public data and real CPU subprocesses, including timeouts be
 publication, during a new CSV write and after a complete export. They also check metric
 recomputation, split consistency, recovery without a journal, corrupted checkpoints,
 concurrent writers, failure/debug routing, and one-candidate-one-ensemble accounting.
+Timing regressions advance a simulated clock while running real prediction/checkpoint
+and artifact verification code. They cover cold-start/fixed overhead, noisy timing,
+resuming after provisional overestimation, truly expensive finalization, and excluding
+runtime work from validation cadence. Real CPU subprocesses consume the returned
+result after both normal completion and budget stops.
 Existing execution/GPU-allocation regressions remain required. Actual GPU training and
-the proposed 90/120-minute budgets require an isolated pilot on the cluster.
+the revised timing policy with 90/120-minute budgets require a new isolated pilot on
+the cluster; the S54–S56 pilot of the previous policy exposed premature five-update
+finalization and generated-code assumptions about the missing score return value.
 
 Sync using Git to a separate checkout for new tasks; do not pull over the shared source
 used by active experiment Pods. This implementation does not apply any cluster jobs.
