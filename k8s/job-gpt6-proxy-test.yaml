@@ -1,0 +1,77 @@
+# Standalone CPU-only GPT-6 compatibility probe against the EXISTING shared proxy.
+# First sync these two new files via Git to /workspace/MLEvolve on the PVC:
+#   utils/verify_gpt6_proxy.py
+#   k8s/job-gpt6-proxy-test.yaml
+# No installs, shared-venv changes, proxy restarts, or experiment configuration changes.
+#
+# From the MLEvolve checkout, apply manually:
+#   kubectl --context nautilus -n ecepxie apply -f k8s/job-gpt6-proxy-test.yaml
+#   kubectl --context nautilus -n ecepxie logs -f job/mlevolve-gpt6-proxy-test
+# To rerun the same name, delete only this test Job, then apply again:
+#   kubectl --context nautilus -n ecepxie delete job mlevolve-gpt6-proxy-test
+#
+# Complete = all five required HTTP checks passed (text, strict JSON, SSE,
+# non-strict function schema, and two sequential strict-tool rounds + final answer).
+# Failed = inspect the per-check errors; 401/403 auth, 404 route/model, 429 quota,
+# 400 parameter incompatibility, incomplete may mean too little output budget.
+# /models inventory is advisory. No SDK integration or sustained-load claim.
+# Model/effort are proxy-reported; missing usage/reasoning evidence emits warnings.
+# Seven short generation requests on success; no retries or model fallback.
+# Each call has a 120-second wall-clock timeout and 8192-token output ceiling.
+# Full report is in pod logs AND persisted in:
+#   /workspace/results/gpt6-proxy-test/<UTC timestamp>-<unique suffix>/report.json
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-gpt6-proxy-test
+  labels:
+    app: mlevolve
+    purpose: gpt6-proxy-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        purpose: gpt6-proxy-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: gpt6-proxy-test
+        image: python:3.11-slim
+        command: ["python3", "-u", "/workspace/MLEvolve/utils/verify_gpt6_proxy.py"]
+        args:
+        - "--output-dir"
+        - "/workspace/results/gpt6-proxy-test"
+        - "--timeout"
+        - "120"
+        - "--max-output-tokens"
+        - "8192"
+        env:
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: TEST_MODEL
+          value: "gpt-6-astra"
+        - name: TEST_REASONING_EFFORT
+          value: "high"
+        - name: LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mlevolve-llm-proxy
+              key: LLM_API_KEY
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
