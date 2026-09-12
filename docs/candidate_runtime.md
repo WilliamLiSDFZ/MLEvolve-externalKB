@@ -33,6 +33,16 @@ The estimate depends on callback timings, not GPU model or memory size. A hard
 timeout still ends non-cooperative or stuck candidates. One candidate retains one
 GPU slot during all its training and inference work.
 
+Create `CandidateSession.from_env()` before expensive preparation. Use
+`session.remaining()` for the candidate's current allowance and `session.elapsed()`
+for its execution duration. The session's deadline starts when the execution slot
+is acquired and is already capped by the whole-run deadline. Never derive a candidate
+deadline from `candidate_results/run.json` (whose `started_at` belongs to the whole
+experiment), parent timestamps or the configured stage budget. This can otherwise
+make a late-starting candidate immediately time out. Preprocessing may consult
+`remaining()`; training uses the stop value from `step()` and then calls `finish()`.
+Do not subtract finalization reserves again: the runtime owns that calculation.
+
 Smoke timing first warms each prediction callback, then measures two subset sizes
 (up to 128 and 512 rows by default). It estimates fixed invocation overhead and
 per-row cost separately; the cold call is not extrapolated across the dataset.
@@ -83,6 +93,10 @@ result = session.finish()                   # also safe after step() returned Tr
 score = result["best_validation_score"]
 submission_path = result["submission_path"]
 ```
+
+The returned prediction paths are authoritative. A successful runtime export does
+not require a legacy `./submission/submission.csv` or `submission_<node_id>.csv` to
+exist; do not add a post-finish assertion for those paths or regenerate their contents.
 
 Predict callbacks must preserve the requested row order, use identical validation
 and test preprocessing, use inference mode and restore the previous train/eval mode.

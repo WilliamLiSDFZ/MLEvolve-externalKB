@@ -241,8 +241,6 @@ class Interpreter:
             end = (process_id + 1) * len(self.available_cpus) // self.max_parallel_run
             cpu_set = set(self.available_cpus[start:end])
             logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
-            pre_code = ("import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
-                        if hasattr(os, "sched_setaffinity") else "")
 
             spec_path = None
             if runtime_active:
@@ -252,7 +250,6 @@ class Interpreter:
 
             code = self.isolate_submission_path(code=code, _id=id)
             code = self.isolate_model_path(code=code, _id=id)
-            code = pre_code + code
 
             # decide runfile location and cwd
             run_wd = Path(working_dir).resolve() if working_dir is not None else self.working_dir
@@ -262,6 +259,18 @@ class Interpreter:
                 f.write(code)
 
             cmd = [sys.executable, str(runfile_path)]
+            if hasattr(os, "sched_setaffinity"):
+                # Set affinity before candidate imports, then replace this process with
+                # a normal script invocation. Keep the candidate's module/docstring,
+                # future imports, __file__, argv and traceback line numbers intact.
+                # preexec_fn is unsafe here because executions run from worker threads.
+                launcher = (
+                    "import os, sys\n"
+                    "if hasattr(os, 'sched_setaffinity'):\n"
+                    f"    os.sched_setaffinity(0, {sorted(cpu_set)!r})\n"
+                    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                )
+                cmd = [sys.executable, "-c", launcher, str(runfile_path)]
             child_env = {**os.environ, "PYTHONUNBUFFERED": "1",
                          "CUDA_VISIBLE_DEVICES": (self.gpu_devices[process_id]
                                                   if self.gpu_devices else "")}
@@ -279,7 +288,7 @@ class Interpreter:
                 with self._procs_lock:
                     self._active_procs[process_id] = proc
 
-            child_in_overtime = False
+            executor_timed_out = False
             exc_type = None
             exc_info = {}
             exc_stack = []
@@ -357,6 +366,7 @@ class Interpreter:
                                         exc_info["message"] = parts[1].strip()
                                     break
             except subprocess.TimeoutExpired:
+                executor_timed_out = True
                 logger.warning("Subprocess timeout, sending SIGINT...")
                 try:
                     self._signal_process_tree(proc, signal.SIGINT)
@@ -381,13 +391,15 @@ class Interpreter:
             if output and output[-1] and not output[-1].endswith("\n"):
                 output.append("\n")
 
-            if exc_type == "TimeoutError":
+            if executor_timed_out:
                 output.append(
-                    f"Execution time: TimeoutError: Execution exceeded the time limit of {humanize.naturaldelta(execution_limit)}"
+                    f"Execution time: {exec_time:.2f} seconds. TimeoutError: Execution exceeded "
+                    f"the time limit of {humanize.naturaldelta(execution_limit)}."
                 )
             else:
                 output.append(
-                    f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(execution_limit)})."
+                    f"Execution time: {exec_time:.2f} seconds "
+                    f"(time limit is {humanize.naturaldelta(execution_limit)})."
                 )
             
             result = ExecutionResult(output, exec_time, exc_type, exc_info, exc_stack)

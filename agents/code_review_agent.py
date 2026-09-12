@@ -78,7 +78,11 @@ def run(agent, node: SearchNode) -> str:
         prompt["Instructions"]["Runtime review"] = (
             "Check fixed split before preprocessing, no held-out rows in training, real backward/optimizer updates before "
             "session.step(), breaking all loops when requested, complete save/load callbacks and session.finish(). "
-            "Repair missing runtime integration. Each predict callback must preserve row order and restore model mode."
+            "Repair missing runtime integration. Replace custom candidate deadlines derived from run.json, run started_at, "
+            "parent timestamps or configured budgets with session.remaining(); the runtime already accounts for queueing "
+            "and the whole-run deadline. Remove duplicate finalization-reserve subtraction and post-finish assertions "
+            "on legacy submission paths; consume result['submission_path'] instead. "
+            "Each predict callback must preserve row order and restore model mode."
         )
     if "Implementation guideline" in prompt["Instructions"]:
         prompt["Instructions"]["Implementation guideline"].extend(internet_clarification)

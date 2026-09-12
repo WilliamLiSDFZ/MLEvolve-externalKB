@@ -506,6 +506,25 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             begin_execution(self.cfg, "draft", CHILD_CODE, started, 60, started - 1)
 
+    def test_session_budget_uses_candidate_admission_not_old_run_start(self):
+        self.runtime.candidate_budget_seconds = 7200
+        self.runtime.finalization_reserve_seconds = 900
+        self.register("late_improve", CHILD_CODE, stage="improve")
+        started = time.time()
+        # Match the S59 failure: over 100 minutes passed before this candidate ran.
+        atomic_json(self.store.root / "run.json", {"started_at": started - 6162})
+        for whole_run_remaining, expected in [(10000, 7200), (1800, 1800)]:
+            with self.subTest(whole_run_remaining=whole_run_remaining):
+                with patch("engine.candidate_runtime.integration.time.time", return_value=started):
+                    path, deadline = begin_execution(self.cfg, "late_improve", CHILD_CODE,
+                                                     started, 21600, started + whole_run_remaining)
+                session = CandidateSession(read_json(path))
+                with patch("engine.candidate_runtime.session.time.time", return_value=started + 140):
+                    self.assertEqual(deadline, started + expected)
+                    self.assertAlmostEqual(session.elapsed(), 140)
+                    self.assertAlmostEqual(session.remaining(), expected - 140)
+                    self.assertGreater(session.remaining(), 900)
+
     def run_child(self, suffix="", timeout=20):
         code = CHILD_CODE + suffix
         self.register("child", code)

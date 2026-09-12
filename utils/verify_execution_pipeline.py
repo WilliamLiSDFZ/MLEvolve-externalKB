@@ -102,10 +102,87 @@ class ExecutionTests(unittest.TestCase):
     def test_failure_and_timeout_release_slot(self):
         interpreter = self.interpreter(["0"], timeout=0.15)
         self.assertEqual(interpreter.run("raise ValueError('bad')", "bad").exc_type, "ValueError")
-        self.assertEqual(interpreter.run("import time; time.sleep(3)", "slow").exc_type, "TimeoutError")
+        timeout = interpreter.run("import time; time.sleep(3)", "slow")
+        self.assertEqual(timeout.exc_type, "TimeoutError")
+        self.assertIn("Execution exceeded the time limit", timeout.term_out[-1])
+        self.assertIn(f"{timeout.exec_time:.2f} seconds", timeout.term_out[-1])
         self.assertIsNone(interpreter.run("print('recovered')", "ok").exc_type)
         self.assertEqual(interpreter.current_parallel_run, 0)
         self.assertFalse(list(self.root.glob("runfile_*.py")))
+
+    def test_candidate_timeout_does_not_claim_executor_deadline_expired(self):
+        interpreter = self.interpreter(["0"], timeout=30)
+        result = interpreter.run("raise TimeoutError('candidate budget calculation failed')", "early")
+        self.assertEqual(result.exc_type, "TimeoutError")
+        self.assertLess(result.exec_time, 5)
+        self.assertIn("candidate budget calculation failed", "".join(result.term_out))
+        self.assertNotIn("Execution exceeded the time limit", "".join(result.term_out))
+        self.assertIn(f"{result.exec_time:.2f} seconds", result.term_out[-1])
+        self.assertIn("time limit is 30 seconds", result.term_out[-1])
+        self.assertIsNone(interpreter.run("print('recovered')", "ok").exc_type)
+
+    def test_affinity_launcher_preserves_future_import_and_script_semantics(self):
+        interpreter = self.interpreter(["GPU-test"])
+        working = self.root.resolve() / "candidate working directory"
+        working.mkdir()
+        (working / "sibling.py").write_text("VALUE = 42\n")
+        code = (
+            "#!/usr/bin/env python\n# coding: utf-8\n"
+            '"""Candidate café docstring."""\n'
+            "from __future__ import annotations\n"
+            "import json, os, sys\nfrom pathlib import Path\nimport sibling\n"
+            "class Candidate:\n    field: UnavailableAtRuntime\n"
+            "print(json.dumps({'doc': __doc__, 'annotation': Candidate.__annotations__['field'], "
+            "'name': __name__, 'file': __file__, 'argv': sys.argv, 'path0': sys.path[0], "
+            "'source': Path(__file__).read_text(), 'sibling': sibling.VALUE, "
+            "'gpu': os.environ['CUDA_VISIBLE_DEVICES']}))\n"
+        )
+        # Force the launch branch on macOS too; the child checks whether its OS
+        # supports affinity before exec'ing the unmodified candidate as a script.
+        with patch("engine.executor.os.sched_setaffinity", create=True), \
+                patch("engine.executor.subprocess.Popen", wraps=subprocess.Popen) as popen:
+            result = interpreter.run(code, "future", working_dir=str(working))
+        self.assertIsNone(result.exc_type, result.term_out)
+        self.assertEqual(popen.call_args.args[0][1], "-c")
+        observed = json.loads(result.term_out[0])
+        path = str(working / "runfile_0.py")
+        self.assertEqual(observed, {
+            "doc": "Candidate café docstring.", "annotation": "UnavailableAtRuntime",
+            "name": "__main__", "file": path, "argv": [path], "path0": str(working),
+            "source": code, "sibling": 42, "gpu": "GPU-test",
+        })
+        self.assertFalse(Path(path).exists())
+
+    def test_affinity_launcher_preserves_traceback_line_numbers(self):
+        interpreter = self.interpreter(["0"])
+        code = '"""Module documentation."""\nfrom __future__ import annotations\nraise ValueError("candidate")\n'
+        with patch("engine.executor.os.sched_setaffinity", create=True):
+            result = interpreter.run(code, "line-numbers")
+        self.assertEqual(result.exc_type, "ValueError")
+        self.assertEqual(result.exc_stack, [("runfile_0.py", 3, "<module>", "")])
+
+    @unittest.skipUnless(hasattr(os, "sched_getaffinity"), "OS does not expose CPU affinity")
+    def test_affinity_is_applied_before_candidate_imports(self):
+        interpreter = self.interpreter(["0"])
+        # The actual allowed set may be non-contiguous in Kubernetes/cgroups.
+        result = interpreter.run("import os, json\nprint(json.dumps(sorted(os.sched_getaffinity(0))))", "cpus")
+        self.assertIsNone(result.exc_type, result.term_out)
+        self.assertEqual(json.loads(result.term_out[0]), interpreter.available_cpus)
+
+    @unittest.skipUnless(hasattr(os, "sched_setaffinity"), "OS does not expose CPU affinity")
+    def test_affinity_failure_does_not_run_candidate_and_releases_slot(self):
+        interpreter = self.interpreter(["0"])
+        cpus = interpreter.available_cpus
+        interpreter.available_cpus = [max(cpus) + 1000000]
+        result = interpreter.run("from pathlib import Path\nPath('must-not-run').touch()", "bad-affinity")
+        self.assertIsNotNone(result.exc_type)
+        self.assertNotEqual(result.exc_type, "TimeoutError")
+        self.assertNotIn("Execution exceeded the time limit", "".join(result.term_out))
+        self.assertFalse((self.root / "must-not-run").exists())
+        self.assertEqual(interpreter.current_parallel_run, 0)
+        self.assertFalse(interpreter._active_procs)
+        interpreter.available_cpus = cpus
+        self.assertIsNone(interpreter.run("print('recovered')", "ok").exc_type)
 
     def test_launch_failure_releases_slot(self):
         interpreter = self.interpreter(["0"])

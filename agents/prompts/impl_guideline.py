@@ -28,7 +28,12 @@ def get_impl_guideline_from_agent(agent):
         # Replace conflicting legacy output/logging rules; task semantics remain intact.
         result["Implementation guideline"] = [line for line in result["Implementation guideline"]
             if not any(text in line for text in ("MUST print:", "• Path:", "Print only 1 line per epoch",
-                                                 "metric as the last line", "COMPLETE training dataset"))]
+                                                 "metric as the last line", "COMPLETE training dataset",
+                                                 "□ Did I generate submission.csv", "📁 **Directories**:"))]
+        result["Implementation guideline"].append(
+            "📁 **Directories**: Input data in ./input/, temporary files in ./working/. "
+            "The runtime publishes submission files; use result['submission_path'] returned by session.finish()."
+        )
         result["Implementation guideline"].extend(instructions())
         result["Implementation guideline"].append(
             f"Stage budgets (including validation/export): draft/fusion_draft <= "

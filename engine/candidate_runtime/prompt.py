@@ -9,6 +9,13 @@ def instructions():
         "then train_df, valid_df, test_df = session.split(train_df, test_df). Do this BEFORE fitting any transforms. "
         "Use the complete returned training partition; never train on valid_df. Do not make another validation split. "
         "A budget-limited partial epoch is allowed: log actual completed optimizer updates, never claim a full epoch.",
+        "Use session.remaining() for CURRENT candidate seconds remaining and session.elapsed() for elapsed execution time. "
+        "The candidate clock starts after acquiring its execution slot; the runtime already caps its deadline by the "
+        "whole-run deadline. Preprocessing and model loading consume this same allowance. Do not derive a candidate "
+        "deadline from candidate_results/run.json, run started_at, a parent candidate's timestamps, or configured stage "
+        "budgets; do not cache an absolute deadline copied from a previous solution. If preprocessing needs a time check, "
+        "query session.remaining() at that moment. During training, let session.step() decide when to stop and call "
+        "session.finish(); do not subtract finalization reserves again or maintain a second training deadline.",
         "Bind FOUR callbacks using session.bind(predict_validation=..., predict_test=..., save_checkpoint=..., load_checkpoint=...). "
         "Each predict callback receives a NumPy array of POSITIONAL indices into valid_df or test_df and returns a 1D array "
         "of probabilities in precisely that order. Both callbacks use the same trained model, preprocessing and postprocessing. "
@@ -35,6 +42,8 @@ def instructions():
         "execution budget. Do not wait for an epoch boundary to call step; do not catch and suppress runtime/protocol errors.",
         "The session owns submission export and prints Final Validation Score itself. Do not run extra inference, recompute "
         "a score, or require another score attribute after finish(). Do not separately overwrite the submission or use another "
-        "metric for search ranking. Runtime event logs replace the old epoch-only logging requirement. All weights and transforms "
+        "metric for search ranking. Use result['submission_path'] for any downstream file access; do not assert that a "
+        "legacy ./submission/submission.csv or submission_<node_id>.csv exists after a successful runtime export. "
+        "Runtime event logs replace the old epoch-only logging requirement. All weights and transforms "
         "must be reproducible from the saved checkpoint; small diagnostic predictions alone are never a scoreable submission.",
     ]

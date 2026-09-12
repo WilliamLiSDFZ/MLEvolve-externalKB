@@ -42,6 +42,16 @@ Execution callers wait in FIFO order when all slots are busy; they do not fail o
 the active count while queued. Per-candidate execution timeout starts after slot acquisition.
 The existing outer wall-clock budget still includes generation and queue waiting. CPU affinity
 is divided across execution slots, including remainder cores, rather than search workers.
+On platforms with `sched_setaffinity`, a short launcher sets the child CPU mask and
+then replaces itself with the candidate's Python process. It does not prepend code
+to the candidate, so module docstrings, `from __future__` imports and source line
+numbers retain their normal Python behavior. GPU visibility and process groups are
+preserved across the replacement.
+
+Execution summaries report actual elapsed seconds. Only a deadline enforced by the
+executor is reported as exceeding the execution time limit; a candidate that raises
+`TimeoutError` earlier keeps its traceback and elapsed time without that misleading
+claim. Both still follow the existing timeout/debug handling.
 
 Process groups keep a candidate's descendants within its slot: timeout, cancellation and
 completion clean them up before the slot can be reused. SIGTERM from `run_single_task.sh`'s

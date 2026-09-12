@@ -134,6 +134,82 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 3)
         self.assertFalse(should_retry_outer(ctx.exception))
 
+    def timeout_reply(self, representation, code="request_timeout"):
+        error = {"code": code, "message": "synthetic error"}
+        if representation == "json":
+            return completed(status="failed", error=error, text="discard this partial output")
+        delta = {"type": "response.output_text.delta", "delta": "discard this partial output"}
+        if representation == "sse_error":
+            terminal = {"type": "error", **error}
+        elif representation == "sse_sdk_error":
+            # openai==1.66.3 raises APIError for this nested SSE envelope.
+            terminal = {"type": "error", "error": error}
+        elif representation == "sse_failed":
+            terminal = {"type": "response.failed", "response": completed(status="failed", error=error)}
+        elif representation in {"sdk_flat", "sdk_nested"}:
+            return openai.APIError("synthetic error", request=httpx.Request("POST", "https://proxy.invalid/v1/responses"),
+                                   body=error if representation == "sdk_flat" else {"error": error})
+        else:
+            raise AssertionError(representation)
+        return sse(delta, terminal)
+
+    def test_request_timeout_retries_all_error_representations_and_discards_partial(self):
+        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
+            with self.subTest(representation=representation):
+                streaming = representation.startswith("sse_")
+                success = sse({"type": "response.completed", "response": completed("fresh result")}) if streaming else completed("fresh result")
+                reply = self.timeout_reply(representation)
+                client = self.client([reply, success])
+                # Inject SDK exceptions after HTTP so they cannot be converted to
+                # APIConnectionError by the SDK's transport-exception handler.
+                if representation.startswith("sdk_"):
+                    with patch.object(client, "post", side_effect=[reply, success]) as post:
+                        result = self.request(client)
+                    self.assertEqual(post.call_count, 2)
+                    self.assertEqual(post.call_args_list[0], post.call_args_list[1])
+                else:
+                    result = self.request(client, stream=streaming)
+                    self.assertEqual(len(self.requests), 2)
+                    self.assertEqual(self.requests[0], self.requests[1])
+                self.assertEqual(response_text(result), "fresh result")
+
+    def test_request_timeout_exhausts_at_three_attempts(self):
+        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
+            with self.subTest(representation=representation):
+                replies = [self.timeout_reply(representation) for _ in range(3)]
+                client = self.client(replies)
+                if representation.startswith("sdk_"):
+                    with patch.object(client, "post", side_effect=replies) as post:
+                        with self.assertRaises(ResponsesError) as ctx:
+                            self.request(client, max_attempts=20)
+                    self.assertEqual(post.call_count, 3)
+                else:
+                    with self.assertRaises(ResponsesError) as ctx:
+                        self.request(client, stream=representation.startswith("sse_"), max_attempts=20)
+                    self.assertEqual(len(self.requests), 3)
+                self.assertEqual(ctx.exception.category, "transient_exhausted")
+                self.assertEqual(ctx.exception.attempts, 3)
+                self.assertFalse(should_retry_outer(ctx.exception))
+
+    def test_deterministic_error_codes_remain_terminal(self):
+        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
+            for code in ["invalid_api_key", "invalid_parameter", "model_not_found", "insufficient_quota"]:
+                with self.subTest(representation=representation, code=code):
+                    reply = self.timeout_reply(representation, code)
+                    client = self.client([reply])
+                    if representation.startswith("sdk_"):
+                        with patch.object(client, "post", side_effect=reply) as post:
+                            with self.assertRaises(ResponsesError) as ctx:
+                                self.request(client)
+                        self.assertEqual(post.call_count, 1)
+                    else:
+                        with self.assertRaises(ResponsesError) as ctx:
+                            self.request(client, stream=representation.startswith("sse_"))
+                        self.assertEqual(len(self.requests), 1)
+                    self.assertEqual(ctx.exception.attempts, 1)
+                    self.assertNotEqual(ctx.exception.category, "transient_exhausted")
+                    self.assertFalse(should_retry_outer(ctx.exception))
+
     def test_incomplete_refusal_and_model_mismatch_fail_once(self):
         examples = [
             (completed(status="incomplete", incomplete_details={"reason": "max_output_tokens"}), "incomplete"),

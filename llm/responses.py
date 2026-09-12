@@ -20,7 +20,7 @@ from openai import OpenAI, Stream
 
 logger = logging.getLogger("MLEvolve")
 _EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_TRANSIENT_CODES = {"server_error", "rate_limit_exceeded", "timeout", "overloaded"}
+_TRANSIENT_CODES = {"server_error", "rate_limit_exceeded", "timeout", "request_timeout", "overloaded"}
 
 
 class ResponsesError(RuntimeError):
@@ -40,6 +40,16 @@ class ResponsesError(RuntimeError):
 
 class _TransientResponseError(RuntimeError):
     pass
+
+
+def _error_code(error: Any) -> str | None:
+    """Normalize flat SSE/SDK errors and the JSON {error: {...}} envelope."""
+    if not isinstance(error, dict):
+        return None
+    if isinstance(error.get("error"), dict):
+        error = error["error"]
+    code = error.get("code")
+    return code if isinstance(code, str) else None
 
 
 def is_gpt6_model(model: str | None) -> bool:
@@ -111,7 +121,7 @@ def _validate_response(response: dict, model: str, effort: str) -> dict:
     info = response_info(response, requested_model=model, reasoning_effort=effort)
     error = response.get("error") or {}
     if error:
-        code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
+        code = _error_code(error) or "unknown"
         if code in _TRANSIENT_CODES:
             raise _TransientResponseError(f"Responses server failure ({code})")
         raise ResponsesError(f"Responses error ({code})", category="response_error", response_info=info)
@@ -157,7 +167,7 @@ def _read_stream(stream) -> dict:
                     raise ResponsesError("Terminal SSE event lacks response", category="protocol")
                 return response
             if event_type == "error":
-                code = event.get("code", "unknown")
+                code = _error_code(event) or "unknown"
                 if code in _TRANSIENT_CODES:
                     raise _TransientResponseError(f"Responses SSE error ({code})")
                 raise ResponsesError(f"Responses SSE error ({code})", category="response_error")
@@ -171,15 +181,12 @@ def _is_transient(exc: BaseException) -> bool:
                         httpx.TransportError, _TransientResponseError)):
         return True
     if isinstance(exc, openai.APIStatusError):
-        body = getattr(exc, "body", None) or {}
-        error = body.get("error", body) if isinstance(body, dict) else {}
-        code = error.get("code") if isinstance(error, dict) else None
+        code = _error_code(getattr(exc, "body", None))
         if code in {"insufficient_quota", "billing_hard_limit_reached"}:
             return False
         return exc.status_code in {408, 409, 429} or exc.status_code >= 500
     if isinstance(exc, openai.APIError):
-        body = getattr(exc, "body", None) or {}
-        return isinstance(body, dict) and body.get("code") in _TRANSIENT_CODES
+        return _error_code(getattr(exc, "body", None)) in _TRANSIENT_CODES
     return False
 
 
