@@ -35,7 +35,8 @@ CODE_REVIEW_SPEC = FunctionSpec(
                 )
             },
             "revised_code": {
-                "type": "string",
+                # An approved review may explicitly return null instead of a diff.
+                "type": ["string", "null"],
                 "description": (
                     "ONLY if needs_revision=true: Provide targeted fixes using SEARCH/REPLACE diff format.\n\n"
                     "**REQUIRED FORMAT** (use this for each fix):\n"

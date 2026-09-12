@@ -133,7 +133,8 @@ def get_review_func_spec(use_memory: bool) -> FunctionSpec:
                            "Focus on observations only — do not include suggestions for improvement.",
         },
         "metric": {
-            "type": "number",
+            # Failed candidates have no score; downstream code handles null as buggy.
+            "type": ["number", "null"],
             "description": "If the code ran successfully, report the value of the validation metric. Otherwise, leave it null.",
         },
         "lower_is_better": {
