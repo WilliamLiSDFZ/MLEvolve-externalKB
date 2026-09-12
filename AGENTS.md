@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-MLEvolve is an agentic ML-engineering system that solves Kaggle-style / MLE-bench competitions by Monte Carlo Graph Search (MCGS) over a tree of candidate solutions, with stage-specific LLM agents generating and refining code at each node. There is no test suite, package manifest, or linter config; the codebase is run as scripts.
+MLEvolve is an agentic ML-engineering system that solves Kaggle-style / MLE-bench competitions by Monte Carlo Graph Search (MCGS) over a tree of candidate solutions, with stage-specific LLM agents generating and refining code at each node. The codebase is run as scripts; CPU regression checks live in `utils/verify_*.py`.
 
 ## Setup & commands
 
@@ -63,7 +63,7 @@ Notable behavioral switches in `config.yaml` — many double as ablation toggles
 - `solution_manager.py` — top-K candidate tracking and best-solution persistence.
 - `conditions.py` — branch/global stagnation and multi-branch-fusion trigger predicates.
 - `coldstart/` — maps a task to recommended pretrained models via `competition_tag_classified.json` + `models_guidance_classified.json`; `kb_snapshot.py` records the paper corpus a D run could search.
-- `analogy/` — per-improve-node literature retrieval (arm D): `corpus.py` builds BM25 over the KB repo's `output/paper_corpus/records.jsonl`; `agent.py` is a tools loop (`search_papers` / `read_abstract` / `submit_report`) that diagnoses the node's bottleneck, rewrites it as short queries in other subfields' vocabulary, and maps the mechanisms found back as interventions. Only ids seen in search results may be cited. `improve_agent._inject_analogy` injects the report into `prompt["Instructions"]` and stores it as `SearchNode.analogy_report`; traces in `logs/analogy/`. Never ends a run. Design: `Agentic_Knowledge_Base/docs/analogy_bm25_agent_design.md`.
+- `analogy/` — literature retrieval at improve and optionally first draft (arm F): `corpus.py` builds BM25 over the KB repo's `output/paper_corpus/records.jsonl`; `agent.py` preserves the legacy loop, while `observed_loop.py` handles context v2 and GPT-6. `context.py` separates plans from source/runtime facts; `code_tools.py` exposes frozen allow-listed source index/read/diff tools; `report_v2.py` checks visible evidence and keeps complete mechanism blocks. Existing abstract/full-text reading remains supported. `agents/analogy_handoff.py` records explicit planner selection and passes the complete selected mechanism to the coder, with child diff/provenance in `logs/analogy/handoffs/`. Optional analogy failures are traced and return no report. See `docs/analogy_context_v2.md`.
 - `validation/` — `format_server.py` is a standalone Flask app (started by `launch_server.sh`) that wraps mle-bench grading; `format_client.py` calls it; `quality_check.py` does submission content/format checks and LLM-assisted fixes.
 
 Node `stage` values: `root`, `draft`, `fusion_draft`, `improve`, `debug`, `evolution`, `fusion`. Nodes are grouped into branches (`branch_id`); much of the search logic is per-branch.
@@ -82,7 +82,7 @@ old tasks. Keep configuration keys in both CandidateRuntimeConfig and config.yam
 - `memory/` — `GlobalMemoryLayer`: per-task store of node experience (plan/code/metric/label) with `HybridRetriever` (BM25 + FAISS). Different agents query it differently (similar records to reinforce, dissimilar to encourage novelty).
 - `prompts/` — shared prompt templates and guidelines.
 
-**LLM layer (`llm/`).** `query()` (with optional `FunctionSpec` function-calling) and `generate()` (streaming) dispatch by model-name prefix: `gemini*` → `gemini.py`, everything else → OpenAI-compatible `openai.py`. `model_profiles.py` holds per-family sampling params (Qwen/GPT/Kimi/DeepSeek, thinking vs non-thinking) for the OpenAI backend.
+**LLM layer (`llm/`).** `query()` (with optional `FunctionSpec`) and streaming `generate()` dispatch `gemini*` to `gemini.py` and other models to `openai.py`. GPT-6 uses `responses.py`, including full tool/opaque-state replay, explicit code/feedback roles, bounded transport retries and terminal errors; older model routes remain intact. Active defaults are `gpt-6-astra/high`. Keep all runtime generative calls on configured slots and propagate `transport_retry_exhausted` instead of restarting outer generation loops. `utils/llm_preflight.py` records effective configuration; `telemetry.py` records safe per-call metadata without credentials or opaque reasoning contents.
 
 ## Gotchas
 

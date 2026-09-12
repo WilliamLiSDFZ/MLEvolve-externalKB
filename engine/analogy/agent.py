@@ -491,6 +491,9 @@ class AnalogyResult:
     out_tokens: int = 0
     seconds: float = 0.0
     fulltext: Optional[dict] = None
+    context: Optional[dict] = None
+    code_reads: Optional[dict] = None
+    model_calls: List[dict] = field(default_factory=list)
 
 
 def _validate_evidence(m: dict, kept: List[str], reading: PaperReadingSession,
@@ -694,10 +697,22 @@ def _tool_message(msg: Any) -> dict:
 def run_analogy_agent(packet_md: str, corpus: PaperCorpus, llm_cfg: Any, *, max_turns: int = 10,
                       top_k: int = 10, max_mechanisms: int = 3,
                       report_char_budget: int = 8000, mode: str = "improve",
-                      fulltext: Optional[FullTextConfig] = None) -> AnalogyResult:
+                      fulltext: Optional[FullTextConfig] = None, context_options=None,
+                      code_session=None, packet_metadata=None, runtime_context=None,
+                      max_output_tokens: int = 16384) -> AnalogyResult:
     """One agent episode. Raises only on programming errors; API/parse failures are caught by
     the callers (`retrieve_for_node`, `retrieve_for_draft`), which turn them into an empty report.
     `mode` selects the prompt and report wording (see _MODES); everything else is shared."""
+    from llm.responses import is_gpt6_model
+    from engine.analogy.context import ContextOptions
+    context_options = context_options or ContextOptions()
+    if context_options.version >= 2 or is_gpt6_model(getattr(llm_cfg, "model", "")):
+        from engine.analogy.observed_loop import run
+        return run(packet_md, corpus, llm_cfg, max_turns=max_turns, top_k=top_k,
+                   max_mechanisms=max_mechanisms, report_char_budget=report_char_budget,
+                   mode=mode, fulltext=fulltext, context_options=context_options,
+                   code_session=code_session, packet_metadata=packet_metadata,
+                   runtime_context=runtime_context, max_output_tokens=max_output_tokens)
     from openai import OpenAI
 
     model = str(getattr(llm_cfg, "model", "") or "")
@@ -867,12 +882,22 @@ def _write_artifacts(log_dir: Path, parent_id: str, packet_md: str, res: Analogy
                                 "fulltext_body_chars": res.fulltext["body_chars"],
                                 "fulltext_papers_opened": len(res.fulltext["documents"]),
                                 "fulltext_read_calls": res.fulltext["read_calls"]}
+        observation_metadata = {}
+        if res.context is not None:
+            context_path = trace_path.with_suffix(".context.json")
+            context_path.write_text(json.dumps({"packet_md": packet_md, "context": res.context,
+                "code_reads": res.code_reads, "model_calls": res.model_calls,
+                "report": res.report, "report_md": res.report_md, "reason": res.reason},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+            observation_metadata = {"context_version": res.context["version"],
+                                    "context_trace": context_path.name}
         line = {"parent_id": parent_id, "invocation": n, "trace": trace_path.name,
                 "ok": bool(res.report_md), "reason": res.reason, "turns": res.turns,
                 "n_queries": len(res.queries), "queries": res.queries,
                 "paper_ids": res.paper_ids, "report_chars": len(res.report_md),
                 "in_tokens": res.in_tokens, "out_tokens": res.out_tokens,
-                "seconds": round(res.seconds, 1), "corpus": corpus.digest, **reading_metadata, **extra}
+                "seconds": round(res.seconds, 1), "corpus": corpus.digest,
+                **reading_metadata, **observation_metadata, **extra}
         with _INDEX_LOCK:
             with (adir / "index.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -880,7 +905,7 @@ def _write_artifacts(log_dir: Path, parent_id: str, packet_md: str, res: Analogy
         logger.warning("[analogy] could not write trace for %s: %s: %s", parent_id, type(e).__name__, e)
 
 
-def retrieve_for_node(agent: Any, parent_node: Any) -> str:
+def retrieve_for_node(agent: Any, parent_node: Any, *, with_result: bool = False):
     """Run the agent for one improve node and return the report markdown ("" = inject nothing).
 
     Never raises. Reads cfg.analogy.* and cfg.agent.code (the model slot).
@@ -899,14 +924,28 @@ def retrieve_for_node(agent: Any, parent_node: Any) -> str:
         return ""
     packet = ""
     try:
-        packet = packet_from_search(agent, parent_node)
+        from engine.analogy.context import context_options, packet_from_search as observed_packet
+        from engine.analogy.code_tools import CodeReadingSession
+        from engine.candidate_runtime.diagnostics import build_runtime_context
+        opts = context_options(acfg)
+        session = metadata = runtime = None
+        if opts.version >= 2:
+            session = CodeReadingSession.from_search(agent, parent_node)
+            runtime = build_runtime_context(agent, parent_node)
+            rendered_packet = observed_packet(agent, parent_node, code_session=session, runtime_facts=runtime)
+            packet, metadata = rendered_packet.text, rendered_packet.metadata
+            runtime = rendered_packet.data.get("runtime_context", {})
+        else:
+            packet = packet_from_search(agent, parent_node)
         res = run_analogy_agent(
             packet, corpus, cfg.agent.code,
             max_turns=int(getattr(acfg, "max_turns", 10)),
             top_k=int(getattr(acfg, "top_k", 10)),
             max_mechanisms=int(getattr(acfg, "max_mechanisms", 3)),
             report_char_budget=int(getattr(acfg, "report_char_budget", 8000)),
-            fulltext=options_from_config(acfg))
+            fulltext=options_from_config(acfg), context_options=opts, code_session=session,
+            packet_metadata=metadata, runtime_context=runtime,
+            max_output_tokens=int(getattr(acfg, "max_output_tokens", 16384)))
     except Exception as e:
         res = AnalogyResult(reason=f"{type(e).__name__}: {e}")
         res.trace.append(f"EXCEPTION: {type(e).__name__}: {e}")
@@ -924,7 +963,7 @@ def retrieve_for_node(agent: Any, parent_node: Any) -> str:
     else:
         logger.info("[analogy] node %s: no report (%s) after %d turns, %d queries",
                     parent_node.id, res.reason or "?", res.turns, len(res.queries))
-    return res.report_md
+    return res if with_result else res.report_md
 
 
 # ------------------------------------------------------------------ entry point for draft_agent (arm E)
@@ -979,17 +1018,32 @@ def retrieve_for_draft(agent: Any) -> str:
                                                                                     False) else ""
         if pretrained.strip() == "None model":
             pretrained = ""
-        packet = build_task_packet(
-            task_desc=getattr(agent, "task_desc", "") or "",
-            data_preview=getattr(agent, "data_preview", "") or "",
-            resources=_resources(cfg), pretrained=pretrained)
+        from engine.analogy.context import (context_options, resource_context,
+                                           build_task_packet as observed_task_packet)
+        opts = context_options(acfg)
+        metadata = None
+        runtime = {}
+        if opts.version >= 2:
+            rendered_packet = observed_task_packet(
+                task_desc=getattr(agent, "task_desc", "") or "",
+                data_preview=getattr(agent, "data_preview", "") or "",
+                resources=resource_context(agent, "draft"), pretrained=pretrained, options=opts)
+            packet, metadata = rendered_packet.text, rendered_packet.metadata
+            runtime = rendered_packet.data.get("runtime_context", {})
+        else:
+            packet = build_task_packet(
+                task_desc=getattr(agent, "task_desc", "") or "",
+                data_preview=getattr(agent, "data_preview", "") or "",
+                resources=_resources(cfg), pretrained=pretrained)
         res = run_analogy_agent(
             packet, corpus, cfg.agent.code, mode="draft",
             max_turns=int(getattr(acfg, "max_turns", 10)),
             top_k=int(getattr(acfg, "top_k", 10)),
             max_mechanisms=int(getattr(acfg, "max_mechanisms", 3)),
             report_char_budget=int(getattr(acfg, "report_char_budget", 8000)),
-            fulltext=options_from_config(acfg))
+            fulltext=options_from_config(acfg), context_options=opts, packet_metadata=metadata,
+            runtime_context=runtime,
+            max_output_tokens=int(getattr(acfg, "max_output_tokens", 16384)))
     except Exception as e:
         res = AnalogyResult(reason=f"{type(e).__name__}: {e}")
         res.trace.append(f"EXCEPTION: {type(e).__name__}: {e}")

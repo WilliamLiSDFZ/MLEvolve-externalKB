@@ -3,6 +3,7 @@ from . import gemini as _gemini
 from . import openai as _openai
 from .gemini import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
 from config import Config
+from .responses import ResponsesError, is_gpt6_model, should_retry_outer
 logger = logging.getLogger("MLEvolve")
 
 
@@ -19,6 +20,7 @@ def query(
     max_tokens: int | None = None,
     func_spec: FunctionSpec | None = None,
     cfg:Config=None,
+    role: str | None = None,
     **model_kwargs,
 ) -> OutputType:
     """
@@ -66,6 +68,7 @@ def query(
             user_message=user_message,
             func_spec=func_spec,
             cfg=cfg,
+            role=role,
             **model_kwargs,
         )
     else:
@@ -90,9 +93,12 @@ def generate(
     json_schema=None,
     max_retries=20,
     retry_delay=3,
+    role="code",
 ):
     """Streaming text generation. Dispatches to Gemini or OpenAI-compatible backend by cfg.agent.code.model."""
-    model = getattr(cfg.agent.code, "model", "") or ""
+    if role not in {"code", "feedback"}:
+        raise ValueError("role must be code or feedback")
+    model = getattr(getattr(cfg.agent, role), "model", "") or ""
     if _provider(model) == "openai":
         return _openai.generate(
             prompt=prompt,
@@ -103,6 +109,7 @@ def generate(
             json_schema=json_schema,
             max_retries=max_retries,
             retry_delay=retry_delay,
+            role=role,
         )
     return _gemini.generate(
         prompt=prompt,

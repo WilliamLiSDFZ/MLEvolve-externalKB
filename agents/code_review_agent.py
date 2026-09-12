@@ -100,7 +100,7 @@ def run(agent, node: SearchNode) -> str:
                     system_message=prompt,
                     user_message=None,
                     func_spec=CODE_REVIEW_SPEC,
-                    model=agent.acfg.code.model,
+                    model=agent.acfg.code.model, role="code",
                     temperature=agent.acfg.code.temp,
                     cfg=agent.cfg
                 ),
@@ -131,6 +131,8 @@ def run(agent, node: SearchNode) -> str:
                             )
                             return node.code
                         except Exception as e:
+                            if getattr(e, "transport_retry_exhausted", False):
+                                raise
                             logger.warning(
                                 f"Failed to apply diff patch in code review: {e}, keeping original code to avoid writing raw diff to runfile"
                             )
@@ -160,6 +162,8 @@ def run(agent, node: SearchNode) -> str:
             return node.code
 
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             error_msg = f"Code review failed with exception: {e}"
             if attempt < max_retries - 1:
                 logger.warning(f"{error_msg} - Will retry (attempt {attempt + 1}/{max_retries})")

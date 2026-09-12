@@ -53,6 +53,12 @@ spec:
           value: "/workspace/data/mlevolve/openadmet/description.md"
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
+        - name: LLM_MODEL
+          value: "gpt-6-astra"
+        - name: LLM_REASONING_EFFORT
+          value: "high"
+        - name: MLEVOLVE_REQUIRE_GPT6
+          value: "1"
         # VENV_DIR defaults to ${REPO_DIR}/.venv (per-project venv) — set only to override
         - name: CPUS_PER_TASK
           value: "4"               # keep in sync with resources below

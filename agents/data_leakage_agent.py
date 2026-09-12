@@ -87,7 +87,7 @@ def run(agent, node: SearchNode) -> dict:
                 system_message=prompt,
                 user_message=None,
                 func_spec=DATA_LEAKAGE_CHECK_SPEC,
-                model=agent.acfg.feedback.model,
+                model=agent.acfg.feedback.model, role="feedback",
                 temperature=agent.acfg.feedback.temp,
                 cfg=agent.cfg
             ),

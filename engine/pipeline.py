@@ -14,6 +14,7 @@ logger = logging.getLogger("MLEvolve")
 
 
 def run_search_pipeline(agent, interpreter, cfg, exec_callback, save_callback):
+    agent.executor = interpreter  # resource observation only; execution scheduling is unchanged
     total_steps = int(cfg.agent.steps)
     draft_count = min(int(cfg.agent.initial_drafts), total_steps)
     search_workers = int(cfg.agent.search.parallel_search_num)
@@ -64,7 +65,11 @@ def run_search_pipeline(agent, interpreter, cfg, exec_callback, save_callback):
                     continue
                 pending.append((node, execution_pool.submit(execute_initial, node)))
                 logger.info("Initial draft %s queued for execution immediately", node.id)
-            except Exception:
+            except Exception as exc:
+                if getattr(exc, "transport_retry_exhausted", False):
+                    # The LLM adapter already classified/retried this failure.
+                    # Another draft would repeat it while retaining a GPU lease.
+                    raise
                 logger.exception("Initial draft %s generation failed", draft_idx + 1)
 
         logger.info("Initial generation complete; releasing %s results to the search", len(pending))
@@ -85,7 +90,11 @@ def run_search_pipeline(agent, interpreter, cfg, exec_callback, save_callback):
                 futures.remove(future)
                 try:
                     node = future.result()
-                except Exception:
+                except Exception as exc:
+                    if getattr(exc, "transport_retry_exhausted", False):
+                        # Failed steps do not increment the journal: swallowing a
+                        # terminal transport error would reschedule indefinitely.
+                        raise
                     logger.exception("Search task failed")
                     node = None
                 save_callback()

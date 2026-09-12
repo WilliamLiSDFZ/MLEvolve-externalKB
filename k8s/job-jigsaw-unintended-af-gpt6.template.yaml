@@ -1,0 +1,248 @@
+# New GPT-6 Astra/high A/F experiment template; historical S51-S56 Jobs remain unchanged.
+# Render a NEW seed/run name before apply, for example from the MLEvolve checkout:
+#   sed 's/__SEED__/57/g' k8s/job-jigsaw-unintended-af-gpt6.template.yaml > /tmp/jubias-gpt6-s57.yaml
+#   kubectl --context nautilus -n ecepxie apply -f /tmp/jubias-gpt6-s57.yaml
+# The user applies Jobs. Both arms retain S56 hardware/90min draft/120min other budgets.
+# F adds analogy at first draft + improve, full-text reading, context v2/source tools.
+# Pin REPO_DIR/entrypoint to an isolated, synchronized checkout when other runs are active.
+# MLEVOLVE_REQUIRE_GPT6 rejects stale model/effort/context overrides before generation.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-base-gpt6-s__SEED__
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: '__SEED__'
+    variant: kb-off
+    arm: a-baseline
+    model-family: gpt6
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: '__SEED__'
+        variant: kb-off
+        arm: a-baseline
+        model-family: gpt6
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - NVIDIA-TITAN-RTX
+                - NVIDIA-A10
+                - NVIDIA-RTX-A5000
+                - NVIDIA-L4
+                - Tesla-V100-SXM2-32GB
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - Quadro-RTX-8000
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-A100-SXM4-40GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-SXM4-80GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/entrypoint.sh
+        env:
+        - name: EXP_ID
+          value: jigsaw-unintended-bias-in-toxicity-classification
+        - name: DATASET_DIR
+          value: /workspace/data/mlebench
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: EXP_NAME
+          value: jubias-base-gpt6-s__SEED__
+        - name: CPUS_PER_TASK
+          value: '8'
+        - name: SERVER_ID
+          value: '95'
+        - name: EXTRA_RUN_ARGS
+          value: 'agent.seed=__SEED__ agent.time_limit=43200 exec.max_parallel_run=1
+            candidate_runtime.enabled=True candidate_runtime.draft_budget_seconds=5400
+            candidate_runtime.candidate_budget_seconds=7200 candidate_runtime.first_validation_seconds=900
+            candidate_runtime.validation_interval_seconds=1800 candidate_runtime.export_interval_seconds=3600
+            candidate_runtime.smoke_steps=5 candidate_runtime.smoke_rows=128 candidate_runtime.finalization_reserve_seconds=900
+            candidate_runtime.finalization_safety_factor=1.5 candidate_runtime.validation_fraction=0.05
+            candidate_runtime.keep_snapshots=2 analogy.enabled=False analogy.fulltext.enabled=False
+
+            analogy.context.version=2 analogy.max_turns=14 analogy.report_char_budget=12000
+            analogy.max_output_tokens=16384
+
+            '
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-6-astra
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRE_GPT6
+          value: '1'
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-anaf-gpt6-s__SEED__
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    repeat: '__SEED__'
+    variant: analogy-draft-improve
+    arm: f-analogy-draft-improve
+    model-family: gpt6
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        repeat: '__SEED__'
+        variant: analogy-draft-improve
+        arm: f-analogy-draft-improve
+        model-family: gpt6
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - NVIDIA-TITAN-RTX
+                - NVIDIA-A10
+                - NVIDIA-RTX-A5000
+                - NVIDIA-L4
+                - Tesla-V100-SXM2-32GB
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - Quadro-RTX-8000
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-A100-SXM4-40GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-SXM4-80GB
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/entrypoint.sh
+        env:
+        - name: EXP_ID
+          value: jigsaw-unintended-bias-in-toxicity-classification
+        - name: DATASET_DIR
+          value: /workspace/data/mlebench
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: EXP_NAME
+          value: jubias-anaf-gpt6-s__SEED__
+        - name: CPUS_PER_TASK
+          value: '8'
+        - name: SERVER_ID
+          value: '96'
+        - name: EXTRA_RUN_ARGS
+          value: 'agent.seed=__SEED__ agent.time_limit=43200 exec.max_parallel_run=1
+            candidate_runtime.enabled=True candidate_runtime.draft_budget_seconds=5400
+            candidate_runtime.candidate_budget_seconds=7200 candidate_runtime.first_validation_seconds=900
+            candidate_runtime.validation_interval_seconds=1800 candidate_runtime.export_interval_seconds=3600
+            candidate_runtime.smoke_steps=5 candidate_runtime.smoke_rows=128 candidate_runtime.finalization_reserve_seconds=900
+            candidate_runtime.finalization_safety_factor=1.5 candidate_runtime.validation_fraction=0.05
+            candidate_runtime.keep_snapshots=2 analogy.enabled=True analogy.draft=True
+            analogy.improve=True analogy.corpus_path=/workspace/Agentic_Knowledge_Base/output/paper_corpus
+            analogy.fulltext.enabled=True analogy.fulltext.cache_dir=/workspace/MLEvolve/cache/paper_fulltext
+            analogy.fulltext.offline=False analogy.fulltext.max_papers=3 analogy.fulltext.max_read_calls=12
+            analogy.fulltext.read_chars=8000 analogy.fulltext.total_chars=40000 analogy.fulltext.open_timeout_seconds=60.0
+            analogy.fulltext.total_open_seconds=150.0
+
+            analogy.context.version=2 analogy.max_turns=14 analogy.report_char_budget=12000
+            analogy.max_output_tokens=16384
+
+            '
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-6-astra
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRE_GPT6
+          value: '1'
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

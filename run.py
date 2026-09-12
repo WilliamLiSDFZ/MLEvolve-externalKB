@@ -28,6 +28,8 @@ def run():
     set_global_seed(cfg.agent.seed)
     logger = setup_logging(cfg)
     logger.info(f'Starting run "{cfg.exp_name}"')
+    from utils.llm_preflight import record_configuration
+    record_configuration(cfg)
 
     task_desc = load_task_desc(cfg)
 
@@ -62,9 +64,10 @@ def run():
     interpreter = Interpreter(
         cfg.workspace_dir, **OmegaConf.to_container(cfg.exec), cfg=cfg  # type: ignore
     )
+    agent.executor = interpreter
+    agent.runtime_deadline = run_deadline  # observed search deadline, including runtime-off tasks
     if enabled(cfg):
         interpreter.run_deadline = run_deadline
-        agent.runtime_deadline = run_deadline
 
     global_step = len(journal)
     status = Status("[green]Generating code...")

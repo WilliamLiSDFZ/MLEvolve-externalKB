@@ -208,6 +208,8 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             logger.info(f"Using diff evolution for node {parent_node.id}")
             plan, code = _diff_evolution(agent, prompt, agent.data_preview, parent_node)
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Diff evolution failed: {e}, falling back to full evolution")
             plan, code = plan_and_code_query(agent, prompt_complete)
     else:

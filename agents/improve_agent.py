@@ -18,6 +18,10 @@ from agents.prompts import (
 from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix, build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
+from agents.analogy_handoff import (
+    attach_report, report_from_prompt, adoption_from_plan, selected_mechanism_brief,
+    record_child_handoff,
+)
 
 logger = logging.getLogger("MLEvolve")
 
@@ -41,13 +45,22 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
         return ""            # arm E: the agent runs on the first draft only
     try:
         from engine.analogy.agent import retrieve_for_node
-        text = retrieve_for_node(agent, parent_node)
+        from engine.analogy.context import context_options
+        structured_report = None
+        if context_options(acfg).version >= 2:
+            result = retrieve_for_node(agent, parent_node, with_result=True)
+            text = result if isinstance(result, str) else result.report_md
+            if not isinstance(result, str):
+                structured_report = result.report
+        else:
+            text = retrieve_for_node(agent, parent_node)
     except Exception as e:  # the import itself must not be able to end a run either
         logger.warning("[analogy] node %s: unavailable (%s: %s) — improving without it",
                        parent_node.id, type(e).__name__, e)
         return ""
     if not text.strip():
         return ""
+    attach_report(prompt, structured_report)
 
     prompt["Instructions"] |= {
         ANALOGY_SECTION: [
@@ -69,6 +82,18 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
             text,
         ],
     }
+    if report_from_prompt(prompt) is not None:
+        prompt["Instructions"]["Explicit analogy selection"] = (
+            "Record a single selected_mechanism_id (one offered ID, or null to reject all), "
+            "analogy_decision_reason and analogy_adaptation in the structured plan. "
+            "For a natural-language full rewrite, put one JSON object on a line beginning "
+            "ANALOGY_ADOPTION: before the outline and Python code. Missing or ambiguous selection "
+            "is recorded as unknown. A declaration is not proof that the mechanism was implemented "
+            "or that it caused a score change."
+            " Offered mechanism IDs: " + ", ".join(
+                str(m.get("mechanism_id")) for m in report_from_prompt(prompt).get("mechanisms", [])
+                if isinstance(m, dict))
+        )
     logger.info("[improve] node %s: injected %d chars of analogy suggestions",
                 parent_node.id, len(text))
     return text
@@ -296,11 +321,15 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
 
     parent_node.add_expected_child_count()
 
+    generation_mode = "full_rewrite"
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff improve for node {parent_node.id}")
             plan, code = _diff_improve(agent, prompt, agent.data_preview, parent_node)
+            generation_mode = "diff"
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Diff improve failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)
     else:
@@ -311,6 +340,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     new_node = SearchNode(plan=plan, code=code, parent=parent_node, stage="improve",
                         local_best_node=parent_node.local_best_node, from_topk=from_topk,
                         analogy_report=analogy_report or None)
+    record_child_handoff(agent, new_node, prompt, generation_mode=generation_mode)
     register_node(agent, new_node, prompt_complete, parent_node=parent_node)
 
     if hasattr(parent_node, '_topk_triggered'):
@@ -387,6 +417,10 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
     if not modules and plans:
         planning_result['module'] = list(plans.keys())
 
+    adoption = adoption_from_plan(prompt_base, planning_result)
+    if adoption is not None:
+        planning_result["analogy_adoption"] = {key: value for key, value in adoption.items()
+                                                if key != "selected_mechanism"}
     return diff_generate_and_apply(
         agent_instance=agent,
         planning_result=planning_result,
@@ -394,4 +428,5 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
         data_preview=data_preview,
         execution_output=context["execution_output"],
         introduction=_IMPROVE_DIFF_INTRODUCTION,
+        analogy_mechanism_brief=selected_mechanism_brief(adoption),
     )

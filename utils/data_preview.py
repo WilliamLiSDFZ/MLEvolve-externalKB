@@ -295,7 +295,7 @@ def clean_task_desc(task_desc: str, cfg) -> str:
         cleaned_desc = query(
             system_message=prompt,
             user_message=None,
-            model=acfg.code.model,
+            model=acfg.code.model, role="code",
             temperature=0.0,
             cfg=cfg
         )

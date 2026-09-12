@@ -30,18 +30,47 @@ pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_
 # it as topic-independent queries, searches the paper corpus with BM25 and maps the mechanisms
 # it finds back onto this pipeline (engine/analogy/, design doc in the KB repo:
 # docs/analogy_bm25_agent_design.md). Per-node artefacts land in logs/analogy/.
-# Nothing is injected at draft time: the query is the diagnosed local problem, which does not
-# exist before the first experiment. Every key here must also exist in config/__init__.py
+# draft=True additionally injects task-level analogy into the first draft (arm E/F).
+# Every key here must also exist in config/__init__.py
 # (AnalogyConfig) — a YAML-only key is a ConfigKeyError at startup.
 analogy:
   enabled: False                # False = arm A, unchanged
   improve: True                 # run the agent at every improve node (arm D)
   draft: False                  # run it ONCE on the task itself, before the first draft (arm E)
   corpus_path: ""               # dir with records.jsonl + manifest.json (KB repo: output/paper_corpus)
-  max_turns: 10                 # hard cap on assistant turns per node (tool-use loop)
+  max_turns: 14                 # includes source inspection and report correction
   top_k: 10                     # default hits per search_papers call (the agent may ask up to 20)
   max_mechanisms: 3             # mechanisms kept per report
-  report_char_budget: 8000      # cap on the injected report; whole mechanisms only
+  report_char_budget: 12000     # includes evidence + complete mechanisms; never sliced JSON
+  max_output_tokens: 16384      # reasoning and visible output share this ceiling
+  context:
+    version: 2                 # saved old configurations without this field retain v1
+    task_head_chars: 8000
+    task_tail_chars: 3000
+    data_chars: 6000
+    plan_chars: 12000
+    implementation_chars: 6000
+    analysis_chars: 5000
+    log_head_chars: 2000
+    log_tail_chars: 6000
+    attempts_chars: 10000
+    trajectory_nodes: 10
+    trajectory_plan_chars: 600
+    runtime_chars: 12000
+    max_packet_chars: 80000
+    pretrained_chars: 4000
+    max_input_tokens: 196608    # accumulated conversation per request; billed usage logged separately
+    endpoint_context_tokens: 262144 # conservative configured cap, not measured proxy capacity
+    input_safety_tokens: 8192
+    final_report_reserve_tokens: 8192
+  code_tools:
+    enabled: True              # only exposed at improve; read-only episode node allow-list
+    max_calls: 10
+    max_total_chars: 120000
+    max_read_chars: 20000
+    default_read_lines: 200
+    max_read_lines: 400
+    max_diff_chars: 20000
   fulltext:
     enabled: False             # opt in to reading original text of retrieved papers (D/E/F)
     cache_dir: ""              # default: MLEvolve/cache/paper_fulltext; shared PVC on cluster
@@ -92,26 +121,23 @@ agent:
   data_preview: True
 
   # --- LLM models ---
-  # Claude Opus 4.8 via Anthropic's OpenAI-compatible endpoint.
-  # NOTE: Opus 4.7+ removed sampling params — `temp` below is IGNORED for these models
-  # (llm/openai.py omits temperature/top_p entirely; sending them returns 400).
-  # Using a gateway instead (e.g. OpenRouter)? Set base_url to the gateway and model to
-  # "anthropic/claude-opus-4-8" — the provider prefix is handled.
   # Credentials come from the ENVIRONMENT, never from this file (it is in git) and never
   # from the command line (argv shows up in `ps` and in `set -x` logs).
   # Set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL — the k8s Secret provides them in-cluster.
-  # Defaults to OpenAI GPT-5.6 Terra (balance of intelligence and cost; `gpt-5.6-sol` is
-  # the flagship, `gpt-5.6-luna` the cheap one). GPT-5 models are reasoning models: they
-  # reject temperature/top_p/presence_penalty and require max_completion_tokens instead of
-  # max_tokens — llm/openai.py handles both automatically, so `temp` below is ignored here.
+  # New experiments default to GPT-6 Astra via Responses, with explicit role/effort.
+  # Sampling settings are omitted for GPT-6. Historical model overrides remain supported.
   code:
-    model: ${oc.env:LLM_MODEL,gpt-5.6-terra}
+    model: ${oc.env:LLM_MODEL,gpt-6-astra}
     temp: 1
+    reasoning_effort: ${oc.env:LLM_REASONING_EFFORT,high}
+    max_output_tokens: 16384
     base_url: ${oc.env:LLM_BASE_URL,https://api.openai.com/v1}
     api_key: ${oc.env:LLM_API_KEY,""}
   feedback:
-    model: ${oc.env:LLM_MODEL,gpt-5.6-terra}
+    model: ${oc.env:LLM_MODEL,gpt-6-astra}
     temp: 1
+    reasoning_effort: ${oc.env:LLM_REASONING_EFFORT,high}
+    max_output_tokens: 16384
     base_url: ${oc.env:LLM_BASE_URL,https://api.openai.com/v1}
     api_key: ${oc.env:LLM_API_KEY,""}
 

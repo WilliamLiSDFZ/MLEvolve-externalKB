@@ -18,6 +18,7 @@ Longer prefixes take precedence (e.g. "gpt-4o" wins over "gpt").
 from __future__ import annotations
 
 _PROFILES: dict[str, dict] = {
+    "gpt-6": {"thinking": {}, "non_thinking": {}},
     # ── Qwen series ──────────────────────────────────────────────────────
     "qwen": {
         "thinking": {
@@ -93,6 +94,7 @@ _THINKING_EXTRA_BODY: dict[str, dict] = {
     # (none/low/medium/high/xhigh/max). MLE search benefits from long reasoning chains,
     # so run at "high" — note this increases output tokens and therefore cost.
     "gpt-5":    {"reasoning_effort": "high"},
+    "gpt-6":    {"reasoning_effort": "high"},
     # Claude Opus 4.6/4.7 + Sonnet 4.6: adaptive thinking is the recommended
     # mode (required on Opus 4.7). Auto-enables interleaved thinking.
     "claude":   {"thinking": {"type": "adaptive"}},
@@ -115,7 +117,7 @@ _NO_TOOL_CHOICE_REQUIRED_PREFIXES = ("kimi", "deepseek", "claude")
 # sending them returns a 400. Sampling params were removed on Claude Opus 4.7+ and Fable 5;
 # OpenAI's GPT-5 family are reasoning models and reject them too.
 _NO_SAMPLING_PARAMS_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable", "fable",
-                                "gpt-5", "o1", "o3", "o4")
+                                "gpt-6", "gpt-5", "o1", "o3", "o4")
 
 # Models that require `max_completion_tokens` instead of `max_tokens` on Chat Completions.
 # OpenAI reasoning models 400 on `max_tokens`: "Unsupported parameter".

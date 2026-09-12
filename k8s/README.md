@@ -44,6 +44,22 @@ git-ignored.
 
 ## Launch a run
 
+New experiments default to GPT-6 Astra/high. The active Job explicitly sets
+`LLM_MODEL`, `LLM_REASONING_EFFORT`, and `MLEVOLVE_REQUIRE_GPT6=1`; preflight rejects
+stale model/effort/context overrides and writes `logs/llm_preflight.json`. The pinned
+OpenAI SDK does not need upgrading. For Jigsaw A/F use the new template:
+
+```bash
+sed 's/__SEED__/57/g' k8s/job-jigsaw-unintended-af-gpt6.template.yaml > /tmp/jubias-gpt6-s57.yaml
+kubectl --context nautilus -n ecepxie apply -f /tmp/jubias-gpt6-s57.yaml
+```
+
+Both arms retain the S56 candidate budgets; F enables first-draft/improve analogy,
+full-text and context v2/source tools. Historical seed Jobs retain their original
+configuration. Synchronize a reviewed commit via Git before launching; with active
+workers, use an isolated checkout and update both the entrypoint path and `REPO_DIR`
+in the new Job. See [context v2 and verification](../docs/analogy_context_v2.md).
+
 ```bash
 EXP_ID=spooky-author-identification   # must be lowercase dns-safe (it becomes the job name)
 sed "s/__EXP_ID__/${EXP_ID}/g" k8s/job-mlevolve.yaml | kubectl -n <NS> apply -f -

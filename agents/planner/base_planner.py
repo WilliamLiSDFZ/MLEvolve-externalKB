@@ -17,6 +17,7 @@ from typing import Dict, Any, Union
 
 from llm import generate, compile_prompt_to_md
 from llm.model_profiles import thinking_json_incompatible
+from agents.analogy_handoff import planning_schema, planning_instruction
 
 logger = logging.getLogger("MLEvolve")
 
@@ -331,6 +332,7 @@ def run_planner(
         f"{your_task_section}",
     ])
     user_prompt = "".join(user_prompt_parts)
+    user_prompt += planning_instruction(prompt_base)
 
     model_name = agent_instance.acfg.code.model.lower()
     planning_prompt_complete = build_model_prompt(
@@ -344,7 +346,7 @@ def run_planner(
     for attempt in range(max_retries):
         logger.info(f"Calling {stage_name} Agent to analyze which modules to modify... (attempt {attempt + 1}/{max_retries})")
 
-        json_schema = PLANNING_JSON_SCHEMA
+        json_schema = planning_schema(PLANNING_JSON_SCHEMA, prompt_base)
 
         planning_response = generate(
             prompt=planning_prompt_complete,

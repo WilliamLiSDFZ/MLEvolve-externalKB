@@ -16,6 +16,7 @@ from typing import Dict, Any
 from llm import generate, compile_prompt_to_md
 from llm.model_profiles import thinking_json_incompatible
 from utils.response import wrap_code
+from agents.analogy_handoff import planning_schema, planning_instruction
 from .base_planner import (
     PLANNING_ALLOWED_MODULES,
     PLANNING_JSON_FORMAT,
@@ -141,6 +142,7 @@ def refine_plan_to_json(
     user_prompt = _build_refine_user_prompt(
         prompt_base, initial_plan_text, refinement_guidance, component_desc_text,
     )
+    user_prompt += planning_instruction(prompt_base, full_report=True)
 
     if refinement_guidance:
         introduction = (
@@ -179,7 +181,7 @@ def refine_plan_to_json(
         assistant_suffix=assistant_suffix,
     )
 
-    json_schema = PLANNING_JSON_SCHEMA
+    json_schema = planning_schema(PLANNING_JSON_SCHEMA, prompt_base)
     max_retries = 3
     planning_result = None
 

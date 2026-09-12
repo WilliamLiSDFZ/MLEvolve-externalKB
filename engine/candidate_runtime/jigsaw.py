@@ -27,25 +27,53 @@ def predictions(values, rows):
     return values
 
 
-def score(answers, values):
+def score_components(answers, values, *, allow_undefined=False):
+    """Return the existing metric's terms and class support, without changing it.
+
+    ``allow_undefined`` is for diagnostics only. The scoring path still rejects
+    missing terms rather than silently dropping a subgroup from the metric.
+    """
     values = predictions(values, len(answers))
     label = answers["target"].to_numpy() >= 0.5
-    overall = float(roc_auc_score(label, values))
+
+    def component(mask, name):
+        positive = int(label[mask].sum())
+        negative = int(mask.sum()) - positive
+        defined = positive > 0 and negative > 0
+        if not defined and not allow_undefined:
+            raise ValueError(f"Undefined AUC for {name}; do not drop metric terms")
+        return dict(auc=float(roc_auc_score(label[mask], values[mask])) if defined else None,
+                    rows=positive + negative, positive_count=positive, negative_count=negative,
+                    defined=defined)
+
+    overall = component(np.ones(len(label), dtype=bool), "overall")
     parts = {"subgroup": [], "bpsn": [], "bnsp": []}
+    identities = {}
     for identity in IDENTITIES:
         group = answers[identity].fillna(0).to_numpy() >= 0.5
         masks = (group, (group & ~label) | (~group & label),
                  (group & label) | (~group & ~label))
+        identities[identity] = {}
         for kind, mask in zip(parts, masks):
-            if np.unique(label[mask]).size != 2:
-                raise ValueError(f"Undefined AUC for {identity}/{kind}; do not drop metric terms")
-            parts[kind].append(float(roc_auc_score(label[mask], values[mask])))
+            term = component(mask, f"{identity}/{kind}")
+            identities[identity][kind] = term
+            parts[kind].append(term["auc"])
 
     def power_mean(values):
+        if any(v is None for v in values):
+            return None
         # The limit is zero if any AUC is zero. Avoid 0 ** -5 warnings.
         return 0.0 if min(values) == 0 else float(np.mean(np.power(values, -5.0)) ** (-0.2))
 
-    return 0.25 * overall + 0.25 * sum(power_mean(v) for v in parts.values())
+    means = {kind: power_mean(v) for kind, v in parts.items()}
+    metric = (0.25 * overall["auc"] + 0.25 * sum(means.values())
+              if overall["auc"] is not None and all(v is not None for v in means.values()) else None)
+    return dict(metric_version=METRIC_VERSION, metric=metric, overall=overall,
+                power_means=means, identities=identities)
+
+
+def score(answers, values):
+    return score_components(answers, values)["metric"]
 
 
 def prepare_contract(workspace, public_dir, seed, fraction, task_id=TASK_ID):

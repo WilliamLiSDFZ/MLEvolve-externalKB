@@ -13,6 +13,8 @@ import shutup
 from rich.logging import RichHandler
 import logging
 from engine.analogy.fulltext import FullTextConfig
+from engine.analogy.context import ContextOptions
+from engine.analogy.code_tools import CodeToolOptions
 from engine.candidate_runtime.config import CandidateRuntimeConfig
 
 # Lazy import to avoid circular dependency with engine.search_node
@@ -36,6 +38,8 @@ class StageConfig:
     temp: float
     base_url: str
     api_key: str
+    reasoning_effort: str = "high"
+    max_output_tokens: int = 16384
 
 @dataclass
 class DecayConfig:
@@ -132,6 +136,9 @@ class AnalogyConfig:
     top_k: int = 10
     max_mechanisms: int = 3
     report_char_budget: int = 8000
+    max_output_tokens: int = 16384
+    context: ContextOptions = field(default_factory=ContextOptions)
+    code_tools: CodeToolOptions = field(default_factory=CodeToolOptions)
     fulltext: FullTextConfig = field(default_factory=FullTextConfig)
 
 

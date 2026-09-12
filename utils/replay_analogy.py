@@ -118,12 +118,96 @@ def _attempts(parent: dict, nodes: list[dict], node2parent: dict) -> str:
     return "\n\n".join(out)
 
 
+def _namespace(value):
+    if isinstance(value, dict):
+        return SimpleNamespace(**{k: _namespace(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_namespace(v) for v in value]
+    return value
+
+
+def _v2_packet(args, journal, selected, desc, preview):
+    from engine.analogy.code_tools import CodeReadingSession, is_completed
+    from engine.analogy.context import ContextOptions, packet_from_search
+    import yaml
+
+    run = Path(args.run).resolve()
+    logs = run / "logs"
+    config_path = logs / "config.yaml"
+    class ReplayConfigLoader(yaml.SafeLoader):
+        pass
+    ReplayConfigLoader.add_constructor("tag:yaml.org,2002:python/object/apply:pathlib.PosixPath",
+                                       lambda loader, node: str(Path(*loader.construct_sequence(node))))
+    config = yaml.load(config_path.read_text(), Loader=ReplayConfigLoader) if config_path.exists() else {}
+    config = config or {}
+    config["workspace_dir"] = str(Path(args.workspace).resolve() if args.workspace else run / "workspace")
+    config["log_dir"] = str(logs)
+    config.setdefault("analogy", {})["context"] = vars(ContextOptions(version=2))
+    config.setdefault("candidate_runtime", {"enabled": False})
+    nodes = {n["id"]: _namespace(n) for n in journal["nodes"]}
+    relations = journal.get("node2parent", {})
+    for n in nodes.values():
+        parent_id = relations.get(n.id)
+        if parent_id is None and isinstance(n.parent, str):
+            parent_id = n.parent
+        n.parent = nodes.get(parent_id)
+        n.children = []
+    current = nodes[selected["id"]]
+
+    def finished_at(node_id):
+        path = logs / "candidate_results" / node_id / "execution.json"
+        if not path.exists():
+            path = Path(config["workspace_dir"]) / "candidate_results/candidates" / node_id / "execution.json"
+        try:
+            return float(json.loads(path.read_text()).get("finished_at"))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    cutoff = finished_at(current.id)
+    # Ancestors necessarily precede this candidate. Other branches/siblings need
+    # an explicit completed timestamp; creation time alone cannot prove completion.
+    allowed_ids = {current.id}
+    ancestor = current.parent
+    while ancestor is not None and ancestor.id not in allowed_ids:
+        allowed_ids.add(ancestor.id)
+        ancestor = ancestor.parent
+    for n in nodes.values():
+        finished = finished_at(n.id)
+        if cutoff is not None and finished is not None and finished <= cutoff and is_completed(n):
+            allowed_ids.add(n.id)
+    retained = [n for n in nodes.values() if n.id in allowed_ids]
+    for n in retained:
+        n.children = [child for child in retained if child.parent is n]
+    branch = [n for n in retained if n.branch_id == current.branch_id]
+    replay_agent = SimpleNamespace(cfg=_namespace(config), task_desc=desc, data_preview=preview,
+        branch_all_nodes={current.branch_id: branch}, branch_successful_nodes={current.branch_id:
+            [n for n in branch if not n.is_buggy and getattr(n, "is_valid", False)]})
+    session = CodeReadingSession.from_search(replay_agent, current)
+    result = packet_from_search(replay_agent, current, code_session=session)
+    result.metadata["replay"] = {"mode": "historical candidate completion cutoff", "cutoff_unix": cutoff,
+        "source": "registered source only when runtime enabled; no mutable runfile fallback",
+        "future_children_excluded": True, "resource_deadline": "unknown in replay; never inferred from stale config"}
+    return result, session
+
+
+def _save_packet(args, packet, rendered=None, code_session=None):
+    if not args.out:
+        return
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(packet, encoding="utf-8")
+    if rendered is not None:
+        out.with_suffix(".context.json").write_text(json.dumps({"metadata": rendered.metadata, "data": rendered.data,
+            "code_reads": {"ledger": code_session.ledger, "anchors": code_session.anchors} if code_session else None},
+            ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", help="run directory (contains logs/journal.json)")
     ap.add_argument("--node", help="node id prefix, or its step number (improve mode)")
-    ap.add_argument("--corpus", required=True, help="dir with records.jsonl + manifest.json")
+    ap.add_argument("--corpus", help="dir with records.jsonl + manifest.json")
     ap.add_argument("--desc", help="description.md (default: recovered from the node's prompt)")
     ap.add_argument("--draft", action="store_true",
                     help="replay the draft-stage (task-structure) variant instead of a node")
@@ -133,7 +217,12 @@ def main() -> int:
     ap.add_argument("--gpu", default="NVIDIA GeForce RTX 3090, 24 GiB", help="draft mode: GPU line")
     ap.add_argument("--out", help="write the full trace here (markdown)")
     ap.add_argument("--packet-only", action="store_true", help="print the packet and stop")
-    ap.add_argument("--max-turns", type=int, default=10)
+    ap.add_argument("--context-version", type=int, choices=(1, 2), default=1)
+    ap.add_argument("--workspace", help="immutable runtime workspace (default: RUN/workspace)")
+    ap.add_argument("--model", default="gpt-6-astra", help="explicit replay model; defaults to GPT-6 Astra")
+    ap.add_argument("--reasoning-effort", default="high")
+    ap.add_argument("--max-turns", type=int, default=None)
+    ap.add_argument("--report-chars", type=int, default=None)
     ap.add_argument("--max-mechanisms", type=int, default=3)
     ap.add_argument("--fulltext", action="store_true", help="enable original-paper reading")
     ap.add_argument("--fulltext-cache", default="", help="shared PDF/text cache directory")
@@ -142,6 +231,10 @@ def main() -> int:
     ap.add_argument("--fulltext-read-chars", type=int, default=8000)
     ap.add_argument("--fulltext-total-chars", type=int, default=40000)
     args = ap.parse_args()
+    args.max_turns = args.max_turns or (14 if args.context_version == 2 else 10)
+    args.report_chars = args.report_chars or (12000 if args.context_version == 2 else 8000)
+    if not args.packet_only and not args.corpus:
+        ap.error("--corpus is required unless --packet-only is used")
 
     mode = "draft" if args.draft else "improve"
     if args.draft:
@@ -164,10 +257,21 @@ def main() -> int:
                        "per-solution execution cap": f"{args.exec_timeout_h:.1f} h",
                        "CPU cores": 8, "GPU": args.gpu},
             pretrained="")
+        rendered = None
+        if args.context_version == 2:
+            from engine.analogy.context import build_task_packet as task_v2, ContextOptions
+            rendered = task_v2(task_desc=desc, data_preview=preview, resources={
+                "replay_mode": "draft with user-supplied nominal resource assumptions",
+                "run_remaining_seconds": None, "search_configured_seconds": args.time_limit_h * 3600,
+                "stage_configured_cap_seconds": args.exec_timeout_h * 3600,
+                "gpu_user_assumption": args.gpu, "actual_candidate_budget": "unknown in offline replay"},
+                pretrained="", options=ContextOptions(version=2))
+            packet = rendered.text
         print(packet)
         if args.packet_only:
+            _save_packet(args, packet, rendered)
             return 0
-        return _run(packet, args, mode)
+        return _run(packet, args, mode, rendered=rendered)
 
     if not (args.run and args.node):
         print("FATAL: --run and --node are required (or use --draft)", file=sys.stderr)
@@ -183,6 +287,14 @@ def main() -> int:
         desc = Path(args.desc).read_text(encoding="utf-8")
     if not desc:
         print("WARN: no task description recovered; pass --desc", file=sys.stderr)
+
+    if args.context_version == 2:
+        rendered, session = _v2_packet(args, j, node, desc, preview)
+        print(rendered.text)
+        if args.packet_only:
+            _save_packet(args, rendered.text, rendered, session)
+            return 0
+        return _run(rendered.text, args, mode, rendered=rendered, code_session=session)
 
     m = node.get("metric") or {}
     maximize = m.get("maximize") if isinstance(m, dict) else None
@@ -207,15 +319,16 @@ def main() -> int:
                      "plan": n.get("plan") or ""} for n in branch[-6:]])
     print(packet)
     if args.packet_only:
+        _save_packet(args, packet)
         return 0
     return _run(packet, args, mode)
 
 
-def _run(packet: str, args, mode: str) -> int:
+def _run(packet: str, args, mode: str, *, rendered=None, code_session=None) -> int:
     corpus = load_corpus(args.corpus)
     if corpus is None:
         return 1
-    llm = SimpleNamespace(model=os.environ.get("LLM_MODEL", "gpt-5.6-terra"),
+    llm = SimpleNamespace(model=args.model, reasoning_effort=args.reasoning_effort,
                           base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
                           api_key=os.environ.get("LLM_API_KEY", ""))
     if not llm.api_key:
@@ -223,7 +336,12 @@ def _run(packet: str, args, mode: str) -> int:
         return 1
     print(f"\n=== running analogy agent: {llm.model} @ {llm.base_url}, corpus {corpus.digest} "
           f"({len(corpus)} papers) ===\n")
+    from engine.analogy.context import ContextOptions
     res = run_analogy_agent(packet, corpus, llm, max_turns=args.max_turns,
+                            report_char_budget=args.report_chars,
+                            context_options=ContextOptions(version=args.context_version),
+                            packet_metadata=rendered.metadata if rendered else None, code_session=code_session,
+                            runtime_context=rendered.data.get("runtime_context", {}) if rendered else None,
                             max_mechanisms=args.max_mechanisms, mode=mode,
                             fulltext=FullTextConfig(enabled=args.fulltext, cache_dir=args.fulltext_cache,
                                 offline=args.fulltext_offline, max_papers=args.fulltext_max_papers,
@@ -235,6 +353,11 @@ def _run(packet: str, args, mode: str) -> int:
     print(f"\nturns {res.turns} | queries {len(res.queries)} | papers {res.paper_ids} | "
           f"tokens in/out {res.in_tokens}/{res.out_tokens} | {res.seconds:.0f}s")
     if args.out:
+        _save_packet(args, packet, rendered, code_session)
+        Path(args.out).with_suffix(".context.json").write_text(json.dumps({
+            "packet_metadata": rendered.metadata if rendered else None,
+            "packet_data": rendered.data if rendered else None, "context": res.context,
+            "code_reads": res.code_reads, "model_calls": res.model_calls}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         Path(args.out).write_text(
             "# packet\n\n" + packet + "\n\n# trace\n\n" + "\n\n".join(res.trace) +
             "\n\n# report\n\n" + (res.report_md or f"(empty: {res.reason})") + "\n" +

@@ -103,6 +103,8 @@ def apply_diff_with_retry(
                     return None, 0, retry_note
 
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Diff attempt {attempt + 1}/{max_retries} failed with exception: {e}")
             retry_note = (
                 f"Your previous diff failed to apply due to an error: {e}. "
@@ -114,6 +116,8 @@ def apply_diff_with_retry(
                 try:
                     current_response = regenerate_fn(current_code, retry_note)
                 except Exception as retry_e:
+                    if getattr(retry_e, "transport_retry_exhausted", False):
+                        raise
                     logger.error(f"Failed to regenerate diff: {retry_e}")
                 continue
             else:

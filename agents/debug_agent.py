@@ -134,6 +134,8 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                     debug_memory_guidance = _format_debug_memory_guidance(agent, similar_fixes)
                     logger.info(f"[Debug] Found {len(similar_fixes)} similar errors with successful fixes from memory")
             except Exception as e:
+                if getattr(e, "transport_retry_exhausted", False):
+                    raise
                 logger.warning(f"[Debug] Failed to retrieve memory for debug: {e}")
         else:
             logger.warning(f"[Debug] No current error found for debug")
@@ -273,6 +275,8 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                     else:
                         logger.warning(f"All {max_diff_retries} diff attempts failed, will fallback to full rewrite")
             except Exception as e:
+                if getattr(e, "transport_retry_exhausted", False):
+                    raise
                 logger.warning(f"Diff attempt {retry_idx + 1}/{max_diff_retries} failed with exception: {e}")
                 retry_note = (
                     f"Your previous diff failed to apply due to an error: {e}. "

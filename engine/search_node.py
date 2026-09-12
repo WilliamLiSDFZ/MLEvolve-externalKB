@@ -82,6 +82,8 @@ class SearchNode(DataClassJsonMixin):
     # (engine/analogy). A declared field so journal.json carries it — the adoption judge in the
     # KB repo reads it per node.
     analogy_report: Optional[str] = field(default=None, kw_only=True)
+    # Explicit planner declaration and child-scoped source/outcome provenance.
+    analogy_adoption: Optional[dict] = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.parent is not None:
@@ -105,6 +107,9 @@ class SearchNode(DataClassJsonMixin):
         self.exc_type = exec_result.exc_type
         self.exc_info = exec_result.exc_info
         self.exc_stack = exec_result.exc_stack
+        if self.analogy_adoption is not None:
+            from agents.analogy_handoff import update_execution_handoff
+            update_execution_handoff(self, exec_result)
 
     @property
     def term_out(self) -> str:

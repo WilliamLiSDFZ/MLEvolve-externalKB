@@ -34,6 +34,8 @@ class Experiment:
         _cfg.eval = eval
         self.cfg = prep_cfg(_cfg)
         runtime_started = time.time()
+        from utils.llm_preflight import record_configuration
+        record_configuration(self.cfg)
 
         self.task_desc = load_task_desc(self.cfg)
 
@@ -52,6 +54,8 @@ class Experiment:
         self.interpreter = Interpreter(
             self.cfg.workspace_dir, **OmegaConf.to_container(self.cfg.exec), cfg=self.cfg  # type: ignore
         )
+        self.agent.executor = self.interpreter
+        self.agent.runtime_deadline = min(self.interpreter.run_deadline, runtime_started + self.cfg.agent.time_limit)
         if enabled(self.cfg):
             self.interpreter.run_deadline = min(self.interpreter.run_deadline, runtime_started + self.cfg.agent.time_limit)
             self.agent.runtime_deadline = self.interpreter.run_deadline

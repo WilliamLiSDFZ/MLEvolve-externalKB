@@ -81,7 +81,7 @@ def determine_metric_direction(agent) -> None:
                     system_message=prompt,
                     user_message=None,
                     func_spec=metric_direction_func_spec,
-                    model=agent.acfg.feedback.model,
+                    model=agent.acfg.feedback.model, role="feedback",
                     temperature=agent.acfg.feedback.temp,
                     cfg=agent.cfg
                 ),
@@ -103,6 +103,8 @@ def determine_metric_direction(agent) -> None:
             return
 
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Attempt {attempt}/{max_retries} failed: {e}")
             if attempt < max_retries:
                 logger.info("Retrying in a moment...")
@@ -378,6 +380,8 @@ def _save_to_global_memory(agent, node: SearchNode):
             parent_node = node.parent
             agent.global_memory.save_node(node, parent_node)
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"[AgentSearch] Failed to save node {node.id} to global memory: {e}")
 
 
@@ -405,7 +409,7 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
                     system_message=prompt,
                     user_message=None,
                     func_spec=get_review_func_spec(getattr(agent.acfg, "use_global_memory", False)),
-                    model=agent.acfg.feedback.model,
+                    model=agent.acfg.feedback.model, role="feedback",
                     temperature=agent.acfg.feedback.temp,
                     cfg=agent.cfg
                 ),
@@ -453,6 +457,8 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
 
             return node
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"[parse] tool call failed: {e}")
             continue
 

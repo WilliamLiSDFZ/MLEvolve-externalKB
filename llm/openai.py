@@ -11,6 +11,10 @@ from openai import OpenAI
 from config import Config
 from .gemini import FunctionSpec, compile_prompt_to_md
 from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name, supports_thinking_params, uses_max_completion_tokens, is_openai_reasoning_model
+from .responses import (ResponsesError, is_gpt6_model, make_response_client,
+                        request_response, response_text, response_function_calls,
+                        response_usage, response_info, function_tool)
+from .telemetry import record_call
 
 logger = logging.getLogger("MLEvolve")
 
@@ -70,8 +74,12 @@ def _parse_json_args(args: str) -> dict:
 OutputType = str | dict
 
 
-def _stage_config_for_model(cfg: Config, model: str):
+def _stage_config_for_model(cfg: Config, model: str, role: str | None = None):
     """Return code or feedback config depending on which model is being used."""
+    if role is not None:
+        if role not in {"code", "feedback"}:
+            raise ValueError("role must be code or feedback")
+        return getattr(cfg.agent, role)
     if cfg.agent.code.model == model:
         return cfg.agent.code
     return cfg.agent.feedback
@@ -100,6 +108,7 @@ def query(
     user_message: str | None,
     func_spec: FunctionSpec | None = None,
     cfg: Config | None = None,
+    role: str | None = None,
     **model_kwargs,
 ) -> tuple[OutputType, float, int, int, dict]:
     """OpenAI-compatible query (chat completions, optional function calling). Same return shape as gemini.query."""
@@ -107,7 +116,56 @@ def query(
         raise ValueError("cfg is required for OpenAI backend")
     filtered = {k: v for k, v in model_kwargs.items() if v is not None}
     model = filtered.get("model", "")
-    stage = _stage_config_for_model(cfg, model)
+    stage = _stage_config_for_model(cfg, model, role)
+    if is_gpt6_model(model):
+        messages = _build_messages(system_message, user_message, model=model)
+        if not messages:
+            raise ResponsesError("Either system_message or user_message is required", category="configuration")
+        effort = filtered.get("reasoning_effort", getattr(stage, "reasoning_effort", "high"))
+        tokens = filtered.get("max_tokens", getattr(stage, "max_output_tokens", 16384))
+        params = {}
+        if func_spec is not None:
+            params = {"tools": [function_tool(func_spec.name, func_spec.description,
+                                             func_spec.json_schema, strict=False)],
+                      "tool_choice": {"type": "function", "name": func_spec.name}}
+        t0 = time.monotonic()
+        response = None
+        resolved_role = role or ("code" if stage is cfg.agent.code else "feedback")
+        try:
+            with make_response_client(stage) as client:
+                response = request_response(client, model=model, input_items=messages,
+                                            reasoning_effort=effort, max_output_tokens=tokens, **params)
+            if func_spec is None:
+                output = response_text(response)
+                if not output.strip():
+                    raise ResponsesError("Expected nonempty text output", category="protocol")
+            else:
+                calls = response_function_calls(response)
+                if len(calls) != 1 or calls[0]["name"] != func_spec.name:
+                    raise ResponsesError("Expected exactly one matching function call", category="protocol")
+                try:
+                    output = _parse_json_args(calls[0]["arguments"])
+                    if not isinstance(output, dict):
+                        raise ValueError("Function arguments must be an object")
+                    # strict=false preserves optional fields; validate against the
+                    # unchanged legacy schema locally before handing it upstream.
+                    import jsonschema
+                    jsonschema.validate(output, func_spec.json_schema)
+                except Exception as exc:
+                    raise ResponsesError("Invalid structured function arguments", category="invalid_output") from exc
+            elapsed = time.monotonic() - t0
+            info = response_info(response, requested_model=model, reasoning_effort=effort)
+            info["role"] = resolved_role
+            record_call(cfg, stage=stage, role=resolved_role, requested_model=model,
+                        effort=effort, max_output_tokens=tokens, elapsed=elapsed, response=response)
+            return output, elapsed, *response_usage(response), info
+        except Exception as exc:
+            record_call(cfg, stage=stage, role=resolved_role, requested_model=model,
+                        effort=effort, max_output_tokens=tokens, elapsed=time.monotonic()-t0,
+                        response=response, error=exc)
+            if isinstance(exc, ResponsesError):
+                raise
+            raise ResponsesError("GPT-6 client configuration or output handling failed", category="client_error") from exc
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,
@@ -250,11 +308,49 @@ def generate(
     json_schema: dict | None = None,
     max_retries: int = 20,
     retry_delay: float = 3,
+    role: str = "code",
 ) -> str:
     """Streaming text generation via OpenAI-compatible Chat API. Supports chat format {system, user, assistant} for Qwen."""
-    stage = cfg.agent.code
+    stage = _stage_config_for_model(cfg, "", role)
     model = stage.model
     messages = _prompt_to_messages(prompt, model=model)
+    if is_gpt6_model(model):
+        effort = getattr(stage, "reasoning_effort", "high")
+        tokens = max_tokens if max_tokens is not None else getattr(stage, "max_output_tokens", 16384)
+        text_format = None if json_schema is None else {
+            "type": "json_schema", "name": "structured_output", "strict": False, "schema": json_schema}
+        response = None
+        t0 = time.monotonic()
+        try:
+            with make_response_client(stage) as client:
+                response = request_response(client, model=model, input_items=messages,
+                                            reasoning_effort=effort, max_output_tokens=tokens,
+                                            text_format=text_format, stream=True,
+                                            max_attempts=max_retries, retry_delay=retry_delay)
+            full_text = response_text(response)
+            if not full_text.strip():
+                raise ResponsesError("Expected nonempty generated text", category="protocol")
+            if json_schema is not None:
+                try:
+                    import jsonschema
+                    jsonschema.validate(json.loads(full_text), json_schema)
+                except Exception as exc:
+                    raise ResponsesError("Invalid generated structured JSON", category="invalid_output") from exc
+            # Responses has no stop parameter; preserve callers' stop semantics
+            # locally only after a fully completed response has been received.
+            if stop_tokens and json_schema is None:
+                ends = [full_text.find(stop) for stop in stop_tokens if stop and stop in full_text]
+                if ends:
+                    full_text = full_text[:min(ends)]
+            record_call(cfg, stage=stage, role=role, requested_model=model, effort=effort,
+                        max_output_tokens=tokens, elapsed=time.monotonic()-t0, response=response)
+            return full_text
+        except Exception as exc:
+            record_call(cfg, stage=stage, role=role, requested_model=model, effort=effort,
+                        max_output_tokens=tokens, elapsed=time.monotonic()-t0, response=response, error=exc)
+            if isinstance(exc, ResponsesError):
+                raise
+            raise ResponsesError("GPT-6 client configuration or output handling failed", category="client_error") from exc
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,

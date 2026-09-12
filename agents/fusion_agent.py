@@ -142,6 +142,8 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
             logger.info(f"Using diff fusion for node {source_node.id} with reference {target_node.id}")
             plan, code = _diff_fusion(agent, prompt, agent.data_preview, source_node)
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Diff fusion failed: {e}, falling back to full fusion")
             plan, code = plan_and_code_query(agent, prompt_complete)
     else:
@@ -284,6 +286,8 @@ def _fuse_with_multiple_references(
             logger.info(f"Using diff multi-fusion for node {parent_node.id} with {len(reference_nodes)} references")
             plan, code = _diff_multi_fusion(agent, prompt, agent.data_preview, parent_node)
         except Exception as e:
+            if getattr(e, "transport_retry_exhausted", False):
+                raise
             logger.warning(f"Diff multi-fusion failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)
     else:

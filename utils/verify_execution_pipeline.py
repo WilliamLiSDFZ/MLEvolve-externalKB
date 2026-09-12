@@ -281,6 +281,91 @@ class PipelineTests(unittest.TestCase):
     def test_interrupt_during_initial_generation(self):
         self.run_case(interrupt=True)
 
+    def _assert_terminal_transport_stops_pipeline(self, *, during_initial):
+        from llm.responses import ResponsesError
+
+        class UnexpectedRetry(BaseException):
+            """Stop a regressed pipeline immediately instead of hanging the test."""
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        cfg = SimpleNamespace(agent=SimpleNamespace(steps=20, initial_drafts=4 if during_initial else 0,
+                              search=SimpleNamespace(parallel_search_num=2)), log_dir=root,
+                              cpu_number=4, start_cpu_id=0)
+        with patch("engine.executor.visible_gpu_devices", return_value=["GPU-test"]):
+            interpreter = Interpreter(root, cfg=cfg)
+        self.addCleanup(interpreter.terminate_all_subprocesses)
+        failure = ResponsesError("synthetic terminal API failure", category="request_error", status_code=400)
+        active_code = "import time\nfrom pathlib import Path\nPath('active-started').touch()\ntime.sleep(30)\n"
+        queued_code = "from pathlib import Path\nPath('queued-started').touch()\n"
+        expected_calls = 3 if during_initial else 2
+        lock = threading.Lock()
+        pools = []
+        outer = self
+
+        class RecordingPool(ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.shutdown_calls = []
+                self.submitted = []
+                pools.append(self)
+                outer.addCleanup(lambda: ThreadPoolExecutor.shutdown(self, wait=True, cancel_futures=True))
+
+            def submit(self, *args, **kwargs):
+                future = super().submit(*args, **kwargs)
+                self.submitted.append(future)
+                return future
+
+            def shutdown(self, wait=True, *, cancel_futures=False):
+                self.shutdown_calls.append((wait, cancel_futures))
+                return super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        class FakeAgent:
+            calls = 0
+            journal = [object()]  # A root only; failure must not trigger more search attempts.
+
+            def step(self, exec_callback, node, execute_immediately=True):
+                with lock:
+                    self.calls += 1
+                    call_number = self.calls
+                if call_number > expected_calls:
+                    raise UnexpectedRetry("terminal transport failure was retried/rescheduled")
+                if call_number == expected_calls:
+                    wait_until(lambda: (root / "active-started").exists())
+                    raise failure
+                if not execute_immediately:
+                    return SimpleNamespace(id=f"initial-{call_number}", pending_execution=True,
+                                           code=active_code if call_number == 1 else queued_code)
+                exec_callback(active_code, "search-active", True)
+                return None
+
+            def execute_deferred_node(self, node, callback):
+                raise UnexpectedRetry("failed initial generation crossed the result barrier")
+
+        agent = FakeAgent()
+        saved = []
+        start = time.monotonic()
+        with patch("engine.pipeline.ThreadPoolExecutor", RecordingPool):
+            with self.assertRaises(ResponsesError) as caught:
+                run_search_pipeline(agent, interpreter, cfg, interpreter.run, lambda: saved.append(True))
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(agent.calls, expected_calls)
+        self.assertTrue(interpreter._stopping)
+        self.assertFalse((root / "queued-started").exists())
+        self.assertEqual(saved, [])
+        self.assertTrue(all(pool.shutdown_calls == [(False, True)] for pool in pools))
+        wait_until(lambda: all(future.done() for pool in pools for future in pool.submitted))
+        self.assertEqual(interpreter.current_parallel_run, 0)
+        self.assertFalse(interpreter._active_procs)
+        self.assertLess(time.monotonic() - start, 8, "terminal failure should not wait for the 30-second candidate")
+
+    def test_terminal_transport_during_initial_drafts_aborts_and_cancels(self):
+        self._assert_terminal_transport_stops_pipeline(during_initial=True)
+
+    def test_terminal_transport_from_search_future_aborts_without_rescheduling(self):
+        self._assert_terminal_transport_stops_pipeline(during_initial=False)
+
     def test_config_schema(self):
         from config import Config, ExecConfig
         from omegaconf import OmegaConf

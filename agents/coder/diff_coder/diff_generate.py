@@ -36,6 +36,7 @@ def diff_generate_and_apply(
     extra_user_sections: str = "",
     learning_guidance: str = "",
     max_diff_retries: int = 3,
+    analogy_mechanism_brief: str = "",
 ) -> Tuple[str, str]:
     model_name = agent_instance.acfg.code.model
 
@@ -50,6 +51,8 @@ def diff_generate_and_apply(
     )
 
     user_prompt_parts = [f"\n# Improvement Plan\n\n{plan_text}\n"]
+    if analogy_mechanism_brief:
+        user_prompt_parts.append(analogy_mechanism_brief)
     if extra_user_sections:
         user_prompt_parts.append(f"\n{extra_user_sections}\n")
     user_prompt_parts.append(f"\n{diff_instructions}\n")
