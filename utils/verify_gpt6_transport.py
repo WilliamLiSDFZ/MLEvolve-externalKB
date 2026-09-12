@@ -8,6 +8,7 @@ pinned openai==1.66.3 through its generic JSON and SSE transport.
 from __future__ import annotations
 
 import copy
+from itertools import product
 import json
 from pathlib import Path
 import sys
@@ -30,6 +31,8 @@ from llm.model_profiles import supports_sampling_params, get_profile
 
 
 MODEL = "gpt-6-astra"
+ERROR_REPRESENTATIONS = ("json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested")
+TRANSIENT_ERROR_CODES = ("request_timeout", "server_is_overloaded")
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"},
           "note": {"type": "string"}}, "required": ["ok"], "additionalProperties": False}
 
@@ -134,7 +137,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 3)
         self.assertFalse(should_retry_outer(ctx.exception))
 
-    def timeout_reply(self, representation, code="request_timeout"):
+    def error_reply(self, representation, code):
         error = {"code": code, "message": "synthetic error"}
         if representation == "json":
             return completed(status="failed", error=error, text="discard this partial output")
@@ -153,12 +156,12 @@ class TransportTests(unittest.TestCase):
             raise AssertionError(representation)
         return sse(delta, terminal)
 
-    def test_request_timeout_retries_all_error_representations_and_discards_partial(self):
-        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
-            with self.subTest(representation=representation):
+    def test_transient_codes_retry_all_error_representations_and_discard_partial(self):
+        for representation, code in product(ERROR_REPRESENTATIONS, TRANSIENT_ERROR_CODES):
+            with self.subTest(representation=representation, code=code):
                 streaming = representation.startswith("sse_")
                 success = sse({"type": "response.completed", "response": completed("fresh result")}) if streaming else completed("fresh result")
-                reply = self.timeout_reply(representation)
+                reply = self.error_reply(representation, code)
                 client = self.client([reply, success])
                 # Inject SDK exceptions after HTTP so they cannot be converted to
                 # APIConnectionError by the SDK's transport-exception handler.
@@ -173,10 +176,10 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(self.requests[0], self.requests[1])
                 self.assertEqual(response_text(result), "fresh result")
 
-    def test_request_timeout_exhausts_at_three_attempts(self):
-        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
-            with self.subTest(representation=representation):
-                replies = [self.timeout_reply(representation) for _ in range(3)]
+    def test_transient_codes_exhaust_at_three_attempts(self):
+        for representation, code in product(ERROR_REPRESENTATIONS, TRANSIENT_ERROR_CODES):
+            with self.subTest(representation=representation, code=code):
+                replies = [self.error_reply(representation, code) for _ in range(3)]
                 client = self.client(replies)
                 if representation.startswith("sdk_"):
                     with patch.object(client, "post", side_effect=replies) as post:
@@ -192,10 +195,10 @@ class TransportTests(unittest.TestCase):
                 self.assertFalse(should_retry_outer(ctx.exception))
 
     def test_deterministic_error_codes_remain_terminal(self):
-        for representation in ["json", "sse_error", "sse_sdk_error", "sse_failed", "sdk_flat", "sdk_nested"]:
-            for code in ["invalid_api_key", "invalid_parameter", "model_not_found", "insufficient_quota"]:
+        for representation in ERROR_REPRESENTATIONS:
+            for code in ["invalid_api_key", "invalid_parameter", "model_not_found", "insufficient_quota", "unknown_proxy_error"]:
                 with self.subTest(representation=representation, code=code):
-                    reply = self.timeout_reply(representation, code)
+                    reply = self.error_reply(representation, code)
                     client = self.client([reply])
                     if representation.startswith("sdk_"):
                         with patch.object(client, "post", side_effect=reply) as post:

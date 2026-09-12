@@ -20,7 +20,10 @@ from openai import OpenAI, Stream
 
 logger = logging.getLogger("MLEvolve")
 _EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_TRANSIENT_CODES = {"server_error", "rate_limit_exceeded", "timeout", "request_timeout", "overloaded"}
+_TRANSIENT_CODES = {
+    "server_error", "rate_limit_exceeded", "timeout", "request_timeout",
+    "overloaded", "server_is_overloaded",
+}
 
 
 class ResponsesError(RuntimeError):
