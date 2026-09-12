@@ -124,17 +124,17 @@ agent:
   # Credentials come from the ENVIRONMENT, never from this file (it is in git) and never
   # from the command line (argv shows up in `ps` and in `set -x` logs).
   # Set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL — the k8s Secret provides them in-cluster.
-  # New experiments default to GPT-6 Astra via Responses, with explicit role/effort.
-  # Sampling settings are omitted for GPT-6. Historical model overrides remain supported.
+  # New experiments use GPT-5.6 Sol via Responses, with explicit role/effort.
+  # Sampling settings are omitted. Historical model overrides remain supported.
   code:
-    model: ${oc.env:LLM_MODEL,gpt-6-astra}
+    model: ${oc.env:LLM_MODEL,gpt-5.6-sol}
     temp: 1
     reasoning_effort: ${oc.env:LLM_REASONING_EFFORT,high}
     max_output_tokens: 16384
     base_url: ${oc.env:LLM_BASE_URL,https://api.openai.com/v1}
     api_key: ${oc.env:LLM_API_KEY,""}
   feedback:
-    model: ${oc.env:LLM_MODEL,gpt-6-astra}
+    model: ${oc.env:LLM_MODEL,gpt-5.6-sol}
     temp: 1
     reasoning_effort: ${oc.env:LLM_REASONING_EFFORT,high}
     max_output_tokens: 16384

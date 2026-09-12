@@ -139,14 +139,14 @@ def run(packet_md, corpus, llm_cfg, *, max_turns, top_k, max_mechanisms,
     from .agent import (AnalogyResult, _MODES, FULLTEXT_PROMPT, TOOLS, reading_tools,
                         validate_report, render_report, _chat_params, _tool_message)
     from .fulltext import PaperReadingSession
-    from llm.responses import (is_gpt6_model, make_response_client, request_response,
+    from llm.responses import (uses_responses, make_response_client, request_response,
                                response_text, response_function_calls, response_info)
     from openai import OpenAI
     import jsonschema
 
     is_v2 = context_options.version >= 2
     code_tools_enabled = (code_session is not None and code_session.options.enabled and mode == "improve")
-    use_responses = is_gpt6_model(llm_cfg.model)
+    use_responses = uses_responses(llm_cfg.model)
     client = (make_response_client(llm_cfg) if use_responses else
               OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None, timeout=600.0))
     reading = PaperReadingSession(corpus, fulltext) if fulltext and fulltext.enabled else None

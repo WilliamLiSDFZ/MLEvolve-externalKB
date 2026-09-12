@@ -19,6 +19,7 @@ from __future__ import annotations
 
 _PROFILES: dict[str, dict] = {
     "gpt-6": {"thinking": {}, "non_thinking": {}},
+    "gpt-5.6-sol": {"thinking": {}, "non_thinking": {}},
     # ── Qwen series ──────────────────────────────────────────────────────
     "qwen": {
         "thinking": {

@@ -1,4 +1,4 @@
-"""GPT-6 Responses transport, including stateless tool and reasoning replay.
+"""Responses transport for GPT-6 and GPT-5.6 Sol, with tool/reasoning replay.
 
 Use the SDK's generic JSON endpoint rather than its generated Responses models:
 openai==1.66.3 predates GPT-6 and newer opaque reasoning fields. Keeping raw
@@ -59,6 +59,16 @@ def is_gpt6_model(model: str | None) -> bool:
     # Mirror profiles' provider-prefix support without accepting gpt-60.
     name = (model or "").lower().split("/")[-1]
     return name == "gpt-6" or name.startswith("gpt-6-")
+
+
+def uses_responses(model: str | None) -> bool:
+    """Keep legacy model routes intact; explicitly opt Sol into Responses."""
+    name = (model or "").lower().rsplit("/", 1)[-1]
+    return is_gpt6_model(model) or bool(re.fullmatch(r"gpt-5\.6-sol(?:-\d{4}-\d{2}-\d{2})?", name))
+
+
+def supports_reasoning_effort(model: str | None, effort: str) -> bool:
+    return uses_responses(model) and (effort in _EFFORTS or (not is_gpt6_model(model) and effort == "none"))
 
 
 def should_retry_outer(exc: BaseException) -> bool:
@@ -204,8 +214,8 @@ def request_response(client: OpenAI, *, model: str, input_items: list[dict] | st
     caller can replay state without server-side persistence. Never reconstruct
     an assistant message from text alone in a tool loop.
     """
-    if not is_gpt6_model(model) or reasoning_effort not in _EFFORTS:
-        raise ResponsesError("GPT-6 requires an explicit supported model/effort", category="configuration")
+    if not supports_reasoning_effort(model, reasoning_effort):
+        raise ResponsesError("Responses requires an explicit supported model/effort", category="configuration")
     if max_output_tokens <= 0 or max_attempts <= 0:
         raise ResponsesError("Token budget and attempts must be positive", category="configuration")
     payload = {"model": model, "input": input_items, "reasoning": {"effort": reasoning_effort},

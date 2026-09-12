@@ -1,16 +1,19 @@
-# Jigsaw S59: paired A/F, GPT-5.6 Sol/high, seed 59.
-# A: baseline. F: first-draft + improve analogy, full text and context v2/source tools.
-# Both: 12h search; 90min draft / 120min other candidates; one candidate per GPU.
-# Sync the new code through Git before launch. User applies these two Jobs:
-# kubectl --context nautilus -n ecepxie apply -f k8s/job-jigsaw-unintended-af-s59.yaml
+# New GPT-5.6 Sol/high A/F experiment template; historical S51-S56 Jobs remain unchanged.
+# Render a NEW seed/run name before apply, for example from the MLEvolve checkout:
+#   sed 's/__SEED__/57/g' k8s/job-jigsaw-unintended-af-sol.template.yaml > /tmp/jubias-gpt56sol-s57.yaml
+#   kubectl --context nautilus -n ecepxie apply -f /tmp/jubias-gpt56sol-s57.yaml
+# The user applies Jobs. Both arms retain S56 hardware/90min draft/120min other budgets.
+# F adds analogy at first draft + improve, full-text reading, context v2/source tools.
+# Pin REPO_DIR/entrypoint to an isolated, synchronized checkout when other runs are active.
+# MLEVOLVE_REQUIRED_MODEL rejects stale model/effort/context overrides before generation.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-base-gpt56sol-s59
+  name: mlevolve-jubias-base-gpt56sol-s__SEED__
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
-    repeat: '59'
+    repeat: '__SEED__'
     variant: kb-off
     arm: a-baseline
     model-family: gpt56sol
@@ -24,7 +27,7 @@ spec:
       labels:
         app: mlevolve
         experiment: jigsaw-unintended-bias
-        repeat: '59'
+        repeat: '__SEED__'
         variant: kb-off
         arm: a-baseline
         model-family: gpt56sol
@@ -69,22 +72,24 @@ spec:
         - name: REPO_DIR
           value: /workspace/MLEvolve
         - name: EXP_NAME
-          value: jubias-base-gpt56sol-s59
+          value: jubias-base-gpt56sol-s__SEED__
         - name: CPUS_PER_TASK
           value: '8'
         - name: SERVER_ID
-          value: '101'
+          value: '95'
         - name: EXTRA_RUN_ARGS
-          value: >-
-            agent.seed=59 agent.time_limit=43200 exec.max_parallel_run=1
+          value: 'agent.seed=__SEED__ agent.time_limit=43200 exec.max_parallel_run=1
             candidate_runtime.enabled=True candidate_runtime.draft_budget_seconds=5400
             candidate_runtime.candidate_budget_seconds=7200 candidate_runtime.first_validation_seconds=900
             candidate_runtime.validation_interval_seconds=1800 candidate_runtime.export_interval_seconds=3600
             candidate_runtime.smoke_steps=5 candidate_runtime.smoke_rows=128 candidate_runtime.finalization_reserve_seconds=900
             candidate_runtime.finalization_safety_factor=1.5 candidate_runtime.validation_fraction=0.05
             candidate_runtime.keep_snapshots=2 analogy.enabled=False analogy.fulltext.enabled=False
+
             analogy.context.version=2 analogy.max_turns=14 analogy.report_char_budget=12000
             analogy.max_output_tokens=16384
+
+            '
         - name: LLM_BASE_URL
           value: http://cliproxy:8317/v1
         - name: LLM_MODEL
@@ -122,11 +127,11 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-anaf-gpt56sol-s59
+  name: mlevolve-jubias-anaf-gpt56sol-s__SEED__
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
-    repeat: '59'
+    repeat: '__SEED__'
     variant: analogy-draft-improve
     arm: f-analogy-draft-improve
     model-family: gpt56sol
@@ -140,7 +145,7 @@ spec:
       labels:
         app: mlevolve
         experiment: jigsaw-unintended-bias
-        repeat: '59'
+        repeat: '__SEED__'
         variant: analogy-draft-improve
         arm: f-analogy-draft-improve
         model-family: gpt56sol
@@ -185,14 +190,13 @@ spec:
         - name: REPO_DIR
           value: /workspace/MLEvolve
         - name: EXP_NAME
-          value: jubias-anaf-gpt56sol-s59
+          value: jubias-anaf-gpt56sol-s__SEED__
         - name: CPUS_PER_TASK
           value: '8'
         - name: SERVER_ID
-          value: '102'
+          value: '96'
         - name: EXTRA_RUN_ARGS
-          value: >-
-            agent.seed=59 agent.time_limit=43200 exec.max_parallel_run=1
+          value: 'agent.seed=__SEED__ agent.time_limit=43200 exec.max_parallel_run=1
             candidate_runtime.enabled=True candidate_runtime.draft_budget_seconds=5400
             candidate_runtime.candidate_budget_seconds=7200 candidate_runtime.first_validation_seconds=900
             candidate_runtime.validation_interval_seconds=1800 candidate_runtime.export_interval_seconds=3600
@@ -204,8 +208,11 @@ spec:
             analogy.fulltext.offline=False analogy.fulltext.max_papers=3 analogy.fulltext.max_read_calls=12
             analogy.fulltext.read_chars=8000 analogy.fulltext.total_chars=40000 analogy.fulltext.open_timeout_seconds=60.0
             analogy.fulltext.total_open_seconds=150.0
+
             analogy.context.version=2 analogy.max_turns=14 analogy.report_char_budget=12000
             analogy.max_output_tokens=16384
+
+            '
         - name: LLM_BASE_URL
           value: http://cliproxy:8317/v1
         - name: LLM_MODEL

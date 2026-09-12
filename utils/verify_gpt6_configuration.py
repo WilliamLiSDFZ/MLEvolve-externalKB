@@ -25,7 +25,8 @@ class ConfigurationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.env = patch.dict(os.environ, {"LLM_MODEL": "gpt-6-astra", "LLM_REASONING_EFFORT": "high",
-            "LLM_BASE_URL": "https://proxy.invalid/v1", "LLM_API_KEY": "test-secret", "MLEVOLVE_REQUIRE_GPT6": "1"})
+            "LLM_BASE_URL": "https://proxy.invalid/v1", "LLM_API_KEY": "test-secret", "MLEVOLVE_REQUIRE_GPT6": "1",
+            "MLEVOLVE_REQUIRED_MODEL": "", "MLEVOLVE_REQUIRED_REASONING_EFFORT": "high"})
         self.env.start()
         self.addCleanup(self.env.stop)
         raw = OmegaConf.load(ROOT/"config/config.yaml")
@@ -93,6 +94,56 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(configs[1].analogy.draft and configs[1].analogy.improve and configs[1].analogy.fulltext.enabled)
         for key in ("draft_budget_seconds", "candidate_budget_seconds", "validation_fraction", "keep_snapshots"):
             self.assertEqual(configs[0].candidate_runtime[key], configs[1].candidate_runtime[key])
+
+
+    def test_sol_jobs_defaults_and_model_guard(self):
+        files = ["job-jigsaw-unintended-af-sol.template.yaml"] + [
+            f"job-jigsaw-unintended-af-s{seed}.yaml" for seed in (57, 58, 59)]
+        historical = list(yaml.safe_load_all((ROOT/"k8s/job-jigsaw-unintended-af-gpt6.template.yaml").read_text().replace("__SEED__", "57")))
+        for filename in files:
+            docs = list(yaml.safe_load_all((ROOT/"k8s"/filename).read_text().replace("__SEED__", "57")))
+            with self.subTest(filename=filename):
+                self.assertEqual(len(docs), 2)
+                for doc, old in zip(docs, historical):
+                    container = doc["spec"]["template"]["spec"]["containers"][0]
+                    old_container = old["spec"]["template"]["spec"]["containers"][0]
+                    env = {x["name"]: x["value"] for x in container["env"]}
+                    self.assertIn("gpt56sol-s", doc["metadata"]["name"])
+                    self.assertIn("gpt56sol-s", env["EXP_NAME"])
+                    self.assertEqual(env["LLM_MODEL"], "gpt-5.6-sol")
+                    self.assertEqual(env["MLEVOLVE_REQUIRED_MODEL"], "gpt-5.6-sol")
+                    for k in ("resources", "image", "volumeMounts"):
+                        self.assertEqual(container[k], old_container[k])
+                    for labels in (doc["metadata"]["labels"], doc["spec"]["template"]["metadata"]["labels"]):
+                        self.assertTrue(all(isinstance(x, str) for x in labels.values()))
+                        self.assertEqual(labels["model-family"], "gpt56sol")
+                    with patch.dict(os.environ, {**env, "MLEVOLVE_REQUIRE_GPT6": "0"}):
+                        cfg = OmegaConf.merge(OmegaConf.load(ROOT/"config/config.yaml"),
+                                              OmegaConf.from_dotlist(shlex.split(env["EXTRA_RUN_ARGS"])))
+                        cfg.log_dir = self.root
+                        info = record_configuration(cfg)
+                        for slot in info["slots"].values():
+                            self.assertEqual((slot["model"], slot["reasoning_effort"], slot["endpoint_type"]),
+                                             ("gpt-5.6-sol", "high", "responses"))
+                        # A/F treatments and budgets must survive the model migration.
+                        old_env = {x["name"]: x["value"] for x in old_container["env"]}
+                        old_args = OmegaConf.from_dotlist(shlex.split(old_env["EXTRA_RUN_ARGS"]))
+                        for key in ("analogy", "candidate_runtime", "exec"):
+                            self.assertEqual(OmegaConf.to_container(OmegaConf.from_dotlist(shlex.split(env["EXTRA_RUN_ARGS"]))[key]),
+                                             OmegaConf.to_container(old_args[key]))
+                        cfg.agent.feedback.model = "gpt-6-astra"
+                        with self.assertRaises(ValueError):
+                            record_configuration(cfg)
+        with patch.dict(os.environ, {"LLM_MODEL": "", "MLEVOLVE_REQUIRE_GPT6": "0"}):
+            os.environ.pop("LLM_MODEL")
+            cfg = OmegaConf.load(ROOT/"config/config.yaml")
+            self.assertEqual(cfg.agent.code.model, "gpt-5.6-sol")
+            self.assertEqual(cfg.agent.feedback.model, "gpt-5.6-sol")
+
+    def test_conflicting_requirements_fail(self):
+        with patch.dict(os.environ, {"MLEVOLVE_REQUIRED_MODEL": "gpt-5.6-sol"}):
+            with self.assertRaises(ValueError):
+                record_configuration(self.cfg)
 
 
 if __name__ == "__main__":

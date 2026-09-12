@@ -3,7 +3,7 @@ from . import gemini as _gemini
 from . import openai as _openai
 from .gemini import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
 from config import Config
-from .responses import ResponsesError, is_gpt6_model, should_retry_outer
+from .responses import ResponsesError, is_gpt6_model, uses_responses, should_retry_outer
 logger = logging.getLogger("MLEvolve")
 
 

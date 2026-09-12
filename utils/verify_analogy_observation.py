@@ -146,6 +146,22 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result.in_tokens, 150)  # billed total separate from per-request context cap
         self.client.close.assert_called_once()
 
+    def test_sol_preserves_high_reasoning_and_source_tool_replay(self):
+        self.cfg.model = "gpt-5.6-sol"
+        turns = self.evidence_turns() + [response(tool("submit_report", report(), "submit"))]
+        for value in turns:
+            value["model"] = self.cfg.model
+        result = self.execute(turns)
+        self.assertTrue(result.report_md, result.reason)
+        self.assertEqual(result.turns, 3)
+        for request in self.requests:
+            self.assertEqual(request["model"], "gpt-5.6-sol")
+            self.assertEqual(request["reasoning_effort"], "high")
+        history = self.requests[-1]["input_items"]
+        self.assertEqual(sum(x.get("type") == "reasoning" for x in history), 2)
+        outputs = [x["call_id"] for x in history if x.get("type") == "function_call_output"]
+        self.assertEqual(outputs, ["index", "search", "read", "abstract"])
+
     def test_unread_method_body_is_rejected_then_valid_report_resubmits(self):
         turns = [response(tool("candidate_code_index", {"node_id": None}, "index"),
                           tool("search_papers", {"query": "pairwise"}, "search"),

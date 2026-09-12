@@ -1,4 +1,4 @@
-# Analogy context v2 and GPT-6 experiments
+# Analogy context v2 and Responses experiments
 
 Context v2 lets the existing analogy loop inspect the executed candidate before it
 proposes a paper-derived intervention. Plans are labelled as intent; immutable code,
@@ -7,7 +7,7 @@ There is no additional search-node type.
 
 ## Defaults and budgets
 
-The active `config/config.yaml` uses `gpt-6-astra`, reasoning effort `high`, for code
+The active `config/config.yaml` uses `gpt-5.6-sol`, reasoning effort `high`, for code
 and feedback. Analogy uses the code slot. `analogy.context.version=2` enables the
 new context/report contract. Analogy itself remains opt-in. Old saved configurations
 without `analogy.context` retain v1; historical Job files have not been rewritten.
@@ -82,9 +82,9 @@ versus child diffs and execution provenance are saved under
 when execution returns. Final scores/validity are read from that child's journal;
 the record does not automatically claim that analogy caused a score change.
 
-## GPT-6 transport and records
+## Responses transport and records
 
-`llm/responses.py` handles GPT-6 Responses JSON and SSE. It preserves every output
+`llm/responses.py` handles GPT-5.6 Sol and GPT-6 Responses JSON and SSE. It preserves every output
 item and matching tool `call_id` for subsequent turns, including opaque reasoning
 state when the endpoint supplies it. It sends no incompatible sampling parameters.
 The pinned `openai==1.66.3` remains sufficient through the SDK's generic JSON endpoint
@@ -109,22 +109,23 @@ Credentials and opaque reasoning contents are not written to these telemetry fil
 
 ## Run new experiments
 
-Use `k8s/job-jigsaw-unintended-af-gpt6.template.yaml` for a new A/F seed. It keeps
+Use `k8s/job-jigsaw-unintended-af-sol.template.yaml` for a new A/F seed. It keeps
 S56 hardware and 90-minute draft / 120-minute other-candidate budgets. Both arms use
-GPT-6/high; F adds first-draft and improve analogy, full-text reading and context v2.
-`MLEVOLVE_REQUIRE_GPT6=1` rejects stale model, effort or context overrides before
+GPT-5.6 Sol/high; F adds first-draft and improve analogy, full-text reading and context v2.
+`MLEVOLVE_REQUIRED_MODEL=gpt-5.6-sol` requires Sol/high and context v2, rejecting stale overrides before
 generation. Existing Secrets do not need their model value changed because the new
 Job explicitly supplies it.
 
 ```bash
-sed 's/__SEED__/57/g' k8s/job-jigsaw-unintended-af-gpt6.template.yaml > /tmp/jubias-gpt6-s57.yaml
-kubectl --context nautilus -n ecepxie apply -f /tmp/jubias-gpt6-s57.yaml
+sed 's/__SEED__/57/g' k8s/job-jigsaw-unintended-af-sol.template.yaml > /tmp/jubias-gpt56sol-s57.yaml
+kubectl --context nautilus -n ecepxie apply -f /tmp/jubias-gpt56sol-s57.yaml
 ```
 
 Synchronize the approved commit through Git before applying. If experiments are
 running, use a separate fixed checkout and change both the Job entrypoint path and
-`REPO_DIR`; do not pull over a shared checkout used by active workers. Keep new GPT-6
-results distinct from previous GPT-5 batches when estimating treatment effects.
+`REPO_DIR`; do not pull over a shared checkout used by active workers. Keep Sol results distinct from GPT-6 and earlier Terra batches when estimating treatment effects.
+The S57–S59 manifests now use `gpt56sol` in Job/output names. The explicit GPT-6
+template and its `MLEVOLVE_REQUIRE_GPT6=1` guard remain available for historical reproduction.
 
 ## Verification and replay
 
@@ -147,7 +148,7 @@ python utils/replay_analogy.py --run /path/to/run --workspace /path/to/run/works
 
 python utils/replay_analogy.py --run /path/to/run --workspace /path/to/run/workspace \
   --node NODE_PREFIX --context-version 2 --corpus /path/to/paper_corpus \
-  --model gpt-6-astra --reasoning-effort high --fulltext \
+  --model gpt-5.6-sol --reasoning-effort high --fulltext \
   --fulltext-cache /path/to/paper_fulltext --out /tmp/replay.md
 ```
 
@@ -159,3 +160,27 @@ workspace instead. Replay can write a derived diagnostic cache into the run log
 directory; copy `logs/config.yaml` and `logs/journal.json` to a temporary run directory
 and pass the original read-only workspace when preserving historical artifacts.
 `--fulltext-offline` restricts reading to the existing verified paper cache.
+
+## Sol migration verification
+
+Sol uses the same Responses path as GPT-6, including `high` reasoning during
+function/tool calls, structured streaming output, opaque state replay, safe telemetry
+and bounded transient retries. Older Terra and other legacy model overrides keep
+their existing route; context v2 and source/full-text tools do not require a rollback.
+The default 14-turn and input/output budgets, candidate runtime, one-GPU execution
+policy and A/F treatments are unchanged. Model/API switching is not a guarantee
+against shared-proxy rate limits.
+
+A CPU-only live SDK probe uses the exact Sol model with no fallback:
+
+```bash
+python utils/verify_sol_proxy.py --output-dir /tmp/sol-proxy-test
+```
+
+Provide `LLM_API_KEY` / `LLM_BASE_URL` through the environment, or `--config` pointing
+to an existing run's saved configuration. The probe uses six short model requests
+on success, synthetic tools only, and records text/JSON/feedback/multi-turn results.
+It changes neither shared configuration nor experiments. The old standalone
+`verify_gpt6_proxy.py` / GPT-6 probe Job retain their original target.
+
+Official model capabilities: [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol).

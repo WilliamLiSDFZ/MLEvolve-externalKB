@@ -11,7 +11,7 @@ from openai import OpenAI
 from config import Config
 from .gemini import FunctionSpec, compile_prompt_to_md
 from .model_profiles import get_profile, supports_json_schema, thinking_json_incompatible, supports_tool_choice_required, get_thinking_extra_body, supports_sampling_params, normalize_model_name, supports_thinking_params, uses_max_completion_tokens, is_openai_reasoning_model
-from .responses import (ResponsesError, is_gpt6_model, make_response_client,
+from .responses import (ResponsesError, uses_responses, make_response_client,
                         request_response, response_text, response_function_calls,
                         response_usage, response_info, function_tool)
 from .telemetry import record_call
@@ -117,7 +117,7 @@ def query(
     filtered = {k: v for k, v in model_kwargs.items() if v is not None}
     model = filtered.get("model", "")
     stage = _stage_config_for_model(cfg, model, role)
-    if is_gpt6_model(model):
+    if uses_responses(model):
         messages = _build_messages(system_message, user_message, model=model)
         if not messages:
             raise ResponsesError("Either system_message or user_message is required", category="configuration")
@@ -165,7 +165,7 @@ def query(
                         response=response, error=exc)
             if isinstance(exc, ResponsesError):
                 raise
-            raise ResponsesError("GPT-6 client configuration or output handling failed", category="client_error") from exc
+            raise ResponsesError("Responses client configuration or output handling failed", category="client_error") from exc
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,
@@ -314,7 +314,7 @@ def generate(
     stage = _stage_config_for_model(cfg, "", role)
     model = stage.model
     messages = _prompt_to_messages(prompt, model=model)
-    if is_gpt6_model(model):
+    if uses_responses(model):
         effort = getattr(stage, "reasoning_effort", "high")
         tokens = max_tokens if max_tokens is not None else getattr(stage, "max_output_tokens", 16384)
         text_format = None if json_schema is None else {
@@ -350,7 +350,7 @@ def generate(
                         max_output_tokens=tokens, elapsed=time.monotonic()-t0, response=response, error=exc)
             if isinstance(exc, ResponsesError):
                 raise
-            raise ResponsesError("GPT-6 client configuration or output handling failed", category="client_error") from exc
+            raise ResponsesError("Responses client configuration or output handling failed", category="client_error") from exc
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,

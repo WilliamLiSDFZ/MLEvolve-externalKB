@@ -26,7 +26,7 @@ import llm
 from llm import openai as backend
 from llm.responses import (ResponsesError, function_tool, request_response,
                            response_function_calls, response_text, response_usage,
-                           should_retry_outer, is_gpt6_model)
+                           should_retry_outer, is_gpt6_model, uses_responses, supports_reasoning_effort)
 from llm.model_profiles import supports_sampling_params, get_profile
 
 
@@ -330,6 +330,36 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(get_profile(MODEL), {})
         self.assertTrue(is_gpt6_model(MODEL))
         self.assertFalse(is_gpt6_model("gpt-60"))
+
+
+class SolTransportTests(TransportTests):
+    """Run the entire SDK contract/retry matrix against the explicit Sol route."""
+
+    def setUp(self):
+        self.model_patch = patch.dict(globals(), {"MODEL": "gpt-5.6-sol"})
+        self.model_patch.start()
+        self.addCleanup(self.model_patch.stop)
+
+    def test_legacy_chat_path_retained(self):
+        # The compatibility route still exists, but Sol itself must use Responses.
+        cfg = self.cfg()
+        cfg.agent.code.model = "gpt-5.6-terra"
+        completion = NS(choices=[NS(message=NS(content="legacy", tool_calls=None), finish_reason="stop")],
+                        usage=NS(prompt_tokens=1, completion_tokens=2), model="gpt-5.6-terra", created=1)
+        client = NS(chat=NS(completions=NS(create=lambda **kwargs: completion)))
+        with patch.object(backend, "OpenAI", return_value=client), patch.object(backend, "request_response") as responses:
+            result = backend.query("system", "probe", cfg=cfg, model="gpt-5.6-terra")
+        self.assertEqual(result[0], "legacy")
+        responses.assert_not_called()
+        self.assertFalse(is_gpt6_model(MODEL))
+        self.assertTrue(uses_responses(MODEL))
+        self.assertTrue(uses_responses("provider/gpt-5.6-sol-2026-09-01"))
+        self.assertFalse(uses_responses("gpt-5.6-solar"))
+        self.assertFalse(uses_responses("gpt-5.6-terra"))
+        self.assertFalse(supports_sampling_params(MODEL))
+        self.assertEqual(get_profile(MODEL), {})
+        self.assertTrue(supports_reasoning_effort(MODEL, "none"))
+        self.assertFalse(supports_reasoning_effort("gpt-6-astra", "none"))
 
 
 if __name__ == "__main__":

@@ -703,10 +703,10 @@ def run_analogy_agent(packet_md: str, corpus: PaperCorpus, llm_cfg: Any, *, max_
     """One agent episode. Raises only on programming errors; API/parse failures are caught by
     the callers (`retrieve_for_node`, `retrieve_for_draft`), which turn them into an empty report.
     `mode` selects the prompt and report wording (see _MODES); everything else is shared."""
-    from llm.responses import is_gpt6_model
+    from llm.responses import uses_responses
     from engine.analogy.context import ContextOptions
     context_options = context_options or ContextOptions()
-    if context_options.version >= 2 or is_gpt6_model(getattr(llm_cfg, "model", "")):
+    if context_options.version >= 2 or uses_responses(getattr(llm_cfg, "model", "")):
         from engine.analogy.observed_loop import run
         return run(packet_md, corpus, llm_cfg, max_turns=max_turns, top_k=top_k,
                    max_mechanisms=max_mechanisms, report_char_budget=report_char_budget,

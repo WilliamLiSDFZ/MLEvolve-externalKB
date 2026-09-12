@@ -1,4 +1,4 @@
-# Jigsaw S58: paired A/F, GPT-6 Astra/high, seed 58.
+# Jigsaw S58: paired A/F, GPT-5.6 Sol/high, seed 58.
 # A: baseline. F: first-draft + improve analogy, full text and context v2/source tools.
 # Both: 12h search; 90min draft / 120min other candidates; one candidate per GPU.
 # Sync the new code through Git before launch. User applies these two Jobs:
@@ -6,14 +6,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-base-gpt6-s58
+  name: mlevolve-jubias-base-gpt56sol-s58
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
     repeat: '58'
     variant: kb-off
     arm: a-baseline
-    model-family: gpt6
+    model-family: gpt56sol
     context-version: '2'
 spec:
   backoffLimit: 0
@@ -27,7 +27,7 @@ spec:
         repeat: '58'
         variant: kb-off
         arm: a-baseline
-        model-family: gpt6
+        model-family: gpt56sol
         context-version: '2'
     spec:
       restartPolicy: Never
@@ -69,7 +69,7 @@ spec:
         - name: REPO_DIR
           value: /workspace/MLEvolve
         - name: EXP_NAME
-          value: jubias-base-gpt6-s58
+          value: jubias-base-gpt56sol-s58
         - name: CPUS_PER_TASK
           value: '8'
         - name: SERVER_ID
@@ -88,11 +88,11 @@ spec:
         - name: LLM_BASE_URL
           value: http://cliproxy:8317/v1
         - name: LLM_MODEL
-          value: gpt-6-astra
+          value: gpt-5.6-sol
         - name: LLM_REASONING_EFFORT
           value: high
-        - name: MLEVOLVE_REQUIRE_GPT6
-          value: '1'
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
         envFrom:
         - secretRef:
             name: mlevolve-llm-proxy
@@ -122,14 +122,14 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-anaf-gpt6-s58
+  name: mlevolve-jubias-anaf-gpt56sol-s58
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
     repeat: '58'
     variant: analogy-draft-improve
     arm: f-analogy-draft-improve
-    model-family: gpt6
+    model-family: gpt56sol
     context-version: '2'
 spec:
   backoffLimit: 0
@@ -143,7 +143,7 @@ spec:
         repeat: '58'
         variant: analogy-draft-improve
         arm: f-analogy-draft-improve
-        model-family: gpt6
+        model-family: gpt56sol
         context-version: '2'
     spec:
       restartPolicy: Never
@@ -185,7 +185,7 @@ spec:
         - name: REPO_DIR
           value: /workspace/MLEvolve
         - name: EXP_NAME
-          value: jubias-anaf-gpt6-s58
+          value: jubias-anaf-gpt56sol-s58
         - name: CPUS_PER_TASK
           value: '8'
         - name: SERVER_ID
@@ -209,11 +209,11 @@ spec:
         - name: LLM_BASE_URL
           value: http://cliproxy:8317/v1
         - name: LLM_MODEL
-          value: gpt-6-astra
+          value: gpt-5.6-sol
         - name: LLM_REASONING_EFFORT
           value: high
-        - name: MLEVOLVE_REQUIRE_GPT6
-          value: '1'
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
         envFrom:
         - secretRef:
             name: mlevolve-llm-proxy
