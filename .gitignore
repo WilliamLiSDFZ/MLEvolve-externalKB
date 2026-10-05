@@ -83,3 +83,5 @@ evaluate/
 grading_server.output
 CODE_ANALYSIS_REPORT.md
 PROMPT_COMPARISON_REPORT.md
+
+*.DS_Store/
