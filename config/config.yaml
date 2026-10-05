@@ -106,8 +106,10 @@ exec:
                                # in the 2026-09-03 jubias/tf2qa batch died this way). Runs before
                                # that date used 32400; the analysis tier reads this from logs/config.yaml.
   agent_file_name: runfile.py
-  max_parallel_run: null       # auto: one candidate per visible CUDA GPU; CPU-only: one slot.
-                               # A positive value can LOWER GPU concurrency, never oversubscribe it.
+  max_parallel_run: null       # null = agent.search.parallel_search_num execution slots (original
+                               # behaviour: candidates share the visible GPU(s) and inherit the parent's
+                               # CUDA_VISIBLE_DEVICES). A positive integer sets the slot count explicitly;
+                               # both are capped by available CPUs. The k8s A/F Jobs pass exec.max_parallel_run=1.
 
 # ============================================================
 #  Agent config
@@ -170,7 +172,7 @@ agent:
   # --------------------------------------------------------
   search:
     # Parallel & resources
-    parallel_search_num: 3     # search/LLM workers; independent of GPU execution slots
+    parallel_search_num: 3     # search/LLM workers; also the default execution slot count (exec.max_parallel_run: null)
     num_gpus: 1
 
     # Node expansion limits

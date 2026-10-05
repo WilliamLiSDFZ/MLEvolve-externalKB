@@ -259,7 +259,7 @@ class ContextTests(unittest.TestCase):
         data = resource_context(cfg_agent, "draft")
         self.assertEqual(data["run_deadline_unix"], 1e12)
         self.assertEqual(data["queued_candidates"], 2)
-        self.assertIn("not assigned", data["future_candidate_gpu"])
+        self.assertIn("inherits", data["future_candidate_gpu"])
 
 
 def historical_audit(root):

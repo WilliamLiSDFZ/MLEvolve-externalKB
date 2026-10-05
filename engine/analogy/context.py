@@ -284,7 +284,7 @@ def _gpu_observations(executor):
                 continue
             records.append({"nvidia_index": index, "uuid": gpu_uuid, "name": name, "memory_mib": float(memory)})
         result = {"status": "observed", "source": "nvidia-smi inventory", "devices": records,
-                  "cuda_visibility": list(visible), "ordinal_assignment": "not inferred; candidate GPU assigned at dequeue"}
+                  "cuda_visibility": list(visible), "ordinal_assignment": "not inferred; candidates inherit the parent's CUDA mask and share these devices"}
     except (OSError, ValueError, subprocess.SubprocessError):
         result = {"status": "unknown", "reason": "NVIDIA inventory unavailable; no CUDA initialization attempted"}
     _GPU_CACHE[key] = (now, result)
@@ -318,7 +318,7 @@ def resource_context(agent, stage):
               "visible_gpu_ids": list(_get(executor, "gpu_devices", []) or []) if executor is not None else None,
               "visible_gpu_properties": _get(executor, "gpu_properties", None) or _gpu_observations(executor),
               "compiler_commands_available": {name: shutil.which(name) is not None for name in ("gcc", "g++", "nvcc")},
-              "future_candidate_gpu": "not assigned until execution admission",
+              "future_candidate_gpu": "inherits the parent's CUDA_VISIBLE_DEVICES; shared with other active candidates",
               "actual_candidate_budget": "determined after queue wait: min(stage cap, execution timeout, remaining run time)",
               "offline_models": "see offline model section; no availability inferred from model names in plans"}
     return result

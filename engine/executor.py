@@ -57,8 +57,9 @@ class Interpreter:
             working_dir: working directory of the agent
             timeout: timeout per code execution (seconds)
             agent_file_name: base name for runfile (actual names are runfile_0.py, ...)
-            max_parallel_run: optional upper bound; at most one candidate per visible GPU
-            cfg: config (start_cpu_id, cpu_number); search workers do not set execution capacity
+            max_parallel_run: execution slots; None = cfg.agent.search.parallel_search_num (3 without
+                cfg). Candidates share the parent's CUDA mask; capped by available CPUs.
+            cfg: config (start_cpu_id, cpu_number, agent.search.parallel_search_num)
         """
         self.working_dir = Path(working_dir).resolve()
         assert self.working_dir.exists(), f"Working directory {self.working_dir} does not exist"
@@ -68,8 +69,17 @@ class Interpreter:
         if cfg is not None and getattr(getattr(cfg, "candidate_runtime", None), "enabled", False):
             self.run_deadline = min(time.time() + cfg.agent.time_limit,
                                     float(os.environ.get("MLEVOLVE_RUN_DEADLINE", "inf")))
-        self.gpu_devices = visible_gpu_devices()
-        if max_parallel_run is not None and max_parallel_run < 1:
+        try:
+            # Informational only (analogy resource context); scheduling never depends on it.
+            self.gpu_devices = visible_gpu_devices()
+        except Exception as exc:
+            logger.warning("Visible GPU probe failed (%s); candidates still inherit the parent's CUDA mask", exc)
+            self.gpu_devices = []
+        if max_parallel_run is None:
+            # Original coupling: one execution slot per search worker.
+            search_cfg = getattr(getattr(cfg, "agent", None), "search", None)
+            max_parallel_run = int(getattr(search_cfg, "parallel_search_num", None) or 3)
+        if max_parallel_run < 1:
             raise ValueError("max_parallel_run must be positive or None")
         self.start_cpu_id = int(cfg.start_cpu_id) if cfg else 0
         self.cpu_number = int(cfg.cpu_number) if cfg else (os.cpu_count() or 1)
@@ -78,12 +88,10 @@ class Interpreter:
         available_cpus = (sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
                           else list(range(os.cpu_count() or 1)))
         self.available_cpus = available_cpus[:self.cpu_number]
-        requested_slots = max_parallel_run or len(self.gpu_devices) or 1
-        capacity = len(self.gpu_devices) if self.gpu_devices else requested_slots
-        self.max_parallel_run = min(requested_slots, capacity, len(self.available_cpus))
-        if self.max_parallel_run < requested_slots:
-            logger.info("Execution concurrency capped from %s to %s by visible GPUs/CPUs",
-                        requested_slots, self.max_parallel_run)
+        self.max_parallel_run = min(max_parallel_run, len(self.available_cpus))
+        if self.max_parallel_run < max_parallel_run:
+            logger.info("Execution concurrency capped from %s to %s by available CPUs",
+                        max_parallel_run, self.max_parallel_run)
         self.agent_file_name = [f"runfile_{i}.py" for i in range(self.max_parallel_run)]
         self.current_parallel_run = 0
         self.status_map = [0] * self.max_parallel_run
@@ -92,8 +100,8 @@ class Interpreter:
         self._stopping = False
         self._procs_lock = threading.Lock()
         self._active_procs: dict[int, subprocess.Popen] = {}
-        logger.info("Execution slots=%s, visible GPU IDs=%s (one candidate per GPU)",
-                    self.max_parallel_run, self.gpu_devices or "CPU only")
+        logger.info("Execution slots=%s sharing the parent's CUDA mask (visible GPU IDs=%s)",
+                    self.max_parallel_run, self.gpu_devices or "none/unknown")
 
     @staticmethod
     def _signal_process_tree(proc, sig):
@@ -271,9 +279,7 @@ class Interpreter:
                     "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
                 )
                 cmd = [sys.executable, "-c", launcher, str(runfile_path)]
-            child_env = {**os.environ, "PYTHONUNBUFFERED": "1",
-                         "CUDA_VISIBLE_DEVICES": (self.gpu_devices[process_id]
-                                                  if self.gpu_devices else "")}
+            child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             if spec_path is not None:
                 child_env["MLEVOLVE_CANDIDATE_SPEC"] = str(spec_path)
                 child_env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
@@ -434,7 +440,7 @@ class Interpreter:
                             logger.warning(f"Subprocess {process_id} failed to terminate, killing...")
                             self._signal_process_tree(proc, signal.SIGKILL)
                             proc.wait()
-                    # A candidate's DataLoader/background children must not outlive its GPU slot.
+                    # A candidate's DataLoader/background children must not outlive its execution slot.
                     self._signal_process_tree(proc, signal.SIGKILL)
                 except Exception as e:
                     logger.warning(f"Error cleaning up subprocess {process_id}: {e}")

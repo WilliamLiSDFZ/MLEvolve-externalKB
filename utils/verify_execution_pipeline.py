@@ -67,37 +67,61 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 visible_gpu_devices()
 
-    def test_capacity_is_independent_of_search_workers(self):
-        self.assertEqual(self.interpreter(["0"], max_parallel_run=3).max_parallel_run, 1)
-        self.assertEqual(self.interpreter(["0", "1"]).max_parallel_run, 2)
+    def test_capacity_defaults_to_search_workers_and_ignores_gpu_count(self):
+        cpus = len(self.interpreter(["0"]).available_cpus)
+        self.assertEqual(self.interpreter(["0"]).max_parallel_run, min(7, cpus))
+        self.assertEqual(self.interpreter([]).max_parallel_run, min(7, cpus))
+        self.assertEqual(self.interpreter(["0"], max_parallel_run=3).max_parallel_run, min(3, cpus))
         self.assertEqual(self.interpreter(["0", "1"], max_parallel_run=1).max_parallel_run, 1)
-        self.assertEqual(self.interpreter([]).max_parallel_run, 1)
+        self.assertEqual(self.interpreter(["0"], max_parallel_run=cpus + 5).max_parallel_run, cpus)
+        with patch("engine.executor.visible_gpu_devices", return_value=["0"]):
+            no_cfg = Interpreter(self.root)
+        self.addCleanup(no_cfg.terminate_all_subprocesses)
+        self.assertEqual(no_cfg.max_parallel_run, min(3, len(no_cfg.available_cpus)))
         with self.assertRaises(ValueError):
             self.interpreter(["0"], max_parallel_run=0)
 
-    def test_real_subprocesses_do_not_overlap_on_same_device(self):
-        for devices in [["7"], ["GPU-a", "GPU-b"]]:
-            with self.subTest(devices=devices):
-                interpreter = self.interpreter(devices)
-                code = ("import os, time, json\n"
-                        "start = time.monotonic()\n"
-                        "time.sleep(0.25)\n"
-                        "print(json.dumps([os.environ['CUDA_VISIBLE_DEVICES'], start, time.monotonic()]))\n")
-                original_mask = os.environ.get("CUDA_VISIBLE_DEVICES")
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    results = list(pool.map(lambda i: interpreter.run(code, str(i)), range(4)))
-                self.assertTrue(all(r.exc_type is None for r in results))
+    def test_gpu_probe_failure_does_not_block_startup(self):
+        cfg = SimpleNamespace(cpu_number=8, start_cpu_id=0,
+                              agent=SimpleNamespace(search=SimpleNamespace(parallel_search_num=2)))
+        with patch("engine.executor.visible_gpu_devices", side_effect=ValueError("mask mismatch")):
+            interpreter = Interpreter(self.root, cfg=cfg)
+        self.addCleanup(interpreter.terminate_all_subprocesses)
+        self.assertEqual(interpreter.gpu_devices, [])
+        self.assertEqual(interpreter.max_parallel_run, 2)
+        with patch("engine.executor.visible_gpu_devices", return_value=[]):
+            no_search = Interpreter(self.root, cfg=SimpleNamespace(cpu_number=8, start_cpu_id=0,
+                                                                   agent=SimpleNamespace()))
+        self.addCleanup(no_search.terminate_all_subprocesses)
+        self.assertEqual(no_search.max_parallel_run, min(3, len(no_search.available_cpus)))
+
+    def test_candidates_share_parent_mask_and_overlap_on_one_device(self):
+        code = ("import os, time, json\n"
+                "start = time.monotonic()\n"
+                "time.sleep(0.5)\n"
+                "print(json.dumps([os.environ.get('CUDA_VISIBLE_DEVICES'), start, time.monotonic()]))\n")
+        for parent_mask in ["7", None]:
+            with self.subTest(parent_mask=parent_mask):
+                env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+                if parent_mask is not None:
+                    env["CUDA_VISIBLE_DEVICES"] = parent_mask
+                with patch.dict(os.environ, env, clear=True):
+                    interpreter = self.interpreter(["7"] if parent_mask else [], max_parallel_run=2)
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        results = list(pool.map(lambda i: interpreter.run(code, str(i)), range(4)))
+                    self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), parent_mask)
+                self.assertTrue(all(r.exc_type is None for r in results), [r.term_out for r in results])
                 intervals = [json.loads(r.term_out[0]) for r in results]
-                self.assertEqual(set(item[0] for item in intervals), set(devices))
-                for device in devices:
-                    ordered = sorted(item[1:] for item in intervals if item[0] == device)
-                    self.assertTrue(all(a[1] <= b[0] for a, b in zip(ordered, ordered[1:])))
-                if len(devices) == 2:
-                    self.assertTrue(any(a[0] != b[0] and max(a[1], b[1]) < min(a[2], b[2])
-                                        for a in intervals for b in intervals))
-                self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), original_mask)
+                # Verbatim inheritance: no per-candidate mask, and no "" injected when CPU-only.
+                self.assertEqual([item[0] for item in intervals], [parent_mask] * 4)
+                events = sorted([(s, 1) for _, s, _ in intervals] + [(e, -1) for _, _, e in intervals])
+                peak = running = 0
+                for _, delta in events:
+                    running += delta
+                    peak = max(peak, running)
+                self.assertEqual(peak, 2, "two candidates should overlap on the one device, never more than the slots")
                 self.assertEqual(interpreter.current_parallel_run, 0)
-                self.assertEqual(interpreter.status_map, [0] * len(devices))
+                self.assertEqual(interpreter.status_map, [0, 0])
 
     def test_failure_and_timeout_release_slot(self):
         interpreter = self.interpreter(["0"], timeout=0.15)
@@ -140,6 +164,7 @@ class ExecutionTests(unittest.TestCase):
         # Force the launch branch on macOS too; the child checks whether its OS
         # supports affinity before exec'ing the unmodified candidate as a script.
         with patch("engine.executor.os.sched_setaffinity", create=True), \
+                patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}), \
                 patch("engine.executor.subprocess.Popen", wraps=subprocess.Popen) as popen:
             result = interpreter.run(code, "future", working_dir=str(working))
         self.assertIsNone(result.exc_type, result.term_out)
@@ -149,7 +174,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(observed, {
             "doc": "Candidate café docstring.", "annotation": "UnavailableAtRuntime",
             "name": "__main__", "file": path, "argv": [path], "path0": str(working),
-            "source": code, "sibling": 42, "gpu": "GPU-test",
+            "source": code, "sibling": 42, "gpu": "0,1",
         })
         self.assertFalse(Path(path).exists())
 
@@ -163,7 +188,7 @@ class ExecutionTests(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "sched_getaffinity"), "OS does not expose CPU affinity")
     def test_affinity_is_applied_before_candidate_imports(self):
-        interpreter = self.interpreter(["0"])
+        interpreter = self.interpreter(["0"], max_parallel_run=1)
         # The actual allowed set may be non-contiguous in Kubernetes/cgroups.
         result = interpreter.run("import os, json\nprint(json.dumps(sorted(os.sched_getaffinity(0))))", "cpus")
         self.assertIsNone(result.exc_type, result.term_out)
@@ -171,7 +196,7 @@ class ExecutionTests(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "sched_setaffinity"), "OS does not expose CPU affinity")
     def test_affinity_failure_does_not_run_candidate_and_releases_slot(self):
-        interpreter = self.interpreter(["0"])
+        interpreter = self.interpreter(["0"], max_parallel_run=1)
         cpus = interpreter.available_cpus
         interpreter.available_cpus = [max(cpus) + 1000000]
         result = interpreter.run("from pathlib import Path\nPath('must-not-run').touch()", "bad-affinity")
@@ -191,7 +216,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertIsNone(interpreter.run("pass", "ok").exc_type)
 
     def test_waiting_time_does_not_consume_execution_timeout(self):
-        interpreter = self.interpreter(["0"], timeout=0.15)
+        interpreter = self.interpreter(["0"], timeout=0.15, max_parallel_run=1)
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(interpreter.run, "import time; time.sleep(10)", "first")
             wait_until(lambda: interpreter.current_parallel_run == 1)
@@ -200,7 +225,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertIsNone(second.result(timeout=5).exc_type)
 
     def test_termination_cancels_waiters_and_active_process(self):
-        interpreter = self.interpreter(["0"])
+        interpreter = self.interpreter(["0"], max_parallel_run=1)
         with ThreadPoolExecutor(max_workers=2) as pool:
             active = pool.submit(interpreter.run, "import time; time.sleep(30)", "active")
             wait_until(lambda: bool(interpreter._active_procs))
@@ -371,7 +396,7 @@ class PipelineTests(unittest.TestCase):
                               search=SimpleNamespace(parallel_search_num=2)), log_dir=root,
                               cpu_number=4, start_cpu_id=0)
         with patch("engine.executor.visible_gpu_devices", return_value=["GPU-test"]):
-            interpreter = Interpreter(root, cfg=cfg)
+            interpreter = Interpreter(root, cfg=cfg, max_parallel_run=1)
         self.addCleanup(interpreter.terminate_all_subprocesses)
         failure = ResponsesError("synthetic terminal API failure", category="request_error", status_code=400)
         active_code = "import time\nfrom pathlib import Path\nPath('active-started').touch()\ntime.sleep(30)\n"
