@@ -1,0 +1,8 @@
+{
+  "competition": "jigsaw-unintended-bias-in-toxicity-classification",
+  "metric_version": "jubias-continuous-auc-v1",
+  "upstream_revision": "507f92e1138bb6e40dac5c6ee7a6758e6424bf97",
+  "grader_path": "mlebench/competitions/jigsaw-unintended-bias-in-toxicity-classification/grade.py",
+  "original_sha256": "66cdf2e046ca94bf04adb0b5e76465968c3703c3a3863459dea40a098d83f50a",
+  "patched_sha256": "000e216bc0faea8041e11a7f4dccc873e84f18c9d0a27f00bf5ebddb7b0dcd61"
+}

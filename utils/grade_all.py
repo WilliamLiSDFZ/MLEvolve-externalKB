@@ -16,6 +16,8 @@ Output columns:
     medal          gold | silver | bronze | above-med | - | "" if the leaderboard is unusable
     lower_better   1 / 0 / "" — metric direction, so the analysis never has to guess
     file           source CSV
+    metric_version / grader_sha256 / mlebench_version / mlebench_commit
+                   scoring provenance; an unavailable install commit is left empty
 
 Runs whose CSVs fail to grade are still written, with an empty score and the error in `note`.
 Silence about a failure is worse than a row saying it failed: a missing arm looks identical to
@@ -27,11 +29,17 @@ Re-running is cheap and idempotent — grading is a metric computation, no model
 
 import argparse
 import csv
+import math
 import re
 import sys
 from pathlib import Path
 
 import yaml
+
+if __package__:
+    from .mlebench_patch import grading_metadata
+else:
+    from mlebench_patch import grading_metadata
 
 ENS_RE = re.compile(r"top(\d+)ens-total_run_time([\d.]+)h\.csv$")
 
@@ -46,7 +54,8 @@ class _TagIgnoringLoader(yaml.SafeLoader):
 
 def _reconstruct(loader, suffix, node):
     """Rebuild pathlib paths; map every other unknown tag to None. Mapping everything to None is
-    lossy in a way that bites later — see the comment in utils/dump_injected.py."""
+    lossy in a way that bites later: a Path-typed key such as `desc_file` read back as None turns
+    into Path('.') downstream, so paths must be rebuilt rather than dropped."""
     if "pathlib" in suffix and isinstance(node, yaml.SequenceNode):
         parts = [str(p) for p in loader.construct_sequence(node)]
         return str(Path(*parts)) if parts else None
@@ -110,7 +119,7 @@ def main() -> int:
     from mlebench.utils import load_answers, read_csv
 
     reg = registry.set_data_dir(Path(args.data_dir))
-    cache: dict[str, tuple] = {}          # competition -> (comp, answers, lb, lower_better)
+    cache: dict[str, tuple] = {}          # competition -> (comp, answers, lb, lower_better, metadata)
 
     rows = []
     run_dirs = sorted(p for p in root.iterdir() if p.is_dir())
@@ -139,6 +148,8 @@ def main() -> int:
                 print(f"[skip] {run.name}: {comp_id} not gradable — {e}", file=sys.stderr)
                 cache[comp_id] = None
                 continue
+            # Do not emit a fresh-looking scores.csv using the known broken jubias metric.
+            metadata = grading_metadata(comp_id)
             lb = _load_leaderboard(comp)
             lower = None
             if lb is not None:
@@ -146,10 +157,10 @@ def main() -> int:
                     lower = comp.grader.is_lower_better(lb)
                 except Exception:
                     pass
-            cache[comp_id] = (comp, answers, lb, lower)
+            cache[comp_id] = (comp, answers, lb, lower, metadata)
         if cache[comp_id] is None:
             continue
-        comp, answers, lb, lower = cache[comp_id]
+        comp, answers, lb, lower, metadata = cache[comp_id]
 
         for variant, f in work:
             m = ENS_RE.search(f.name)
@@ -158,9 +169,12 @@ def main() -> int:
                    "cum_hours": float(m.group(2)) if m else "",
                    "score": "", "medal": "",
                    "lower_better": "" if lower is None else int(bool(lower)),
-                   "file": f.name, "note": ""}
+                   "file": f.name, "note": "", **metadata}
             try:
-                row["score"] = comp.grader(read_csv(f), answers)
+                score = comp.grader(read_csv(f), answers)
+                if score is None or not math.isfinite(float(score)):
+                    raise ValueError("Grader returned no finite score")
+                row["score"] = float(score)
             except Exception as e:
                 row["note"] = f"{type(e).__name__}: {e}"
                 rows.append(row)
@@ -184,7 +198,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=["run", "competition", "variant", "k", "cum_hours",
-                                           "score", "medal", "lower_better", "file", "note"])
+                                           "score", "medal", "lower_better", "file", "note",
+                                           "metric_version", "grader_sha256", "mlebench_version",
+                                           "mlebench_commit"])
         w.writeheader()
         w.writerows(rows)
 
