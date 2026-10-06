@@ -36,6 +36,21 @@ if [ "${VIRTUAL_ENV:-}" != "${VENV_DIR}" ]; then
     echo "         rm -rf ${VENV_DIR} && bash ${REPO_DIR}/k8s/setup-venv.sh"
     exit 1
 fi
+
+# Triton/Inductor compile native helpers inside each Job container. Compilers installed
+# on the dev pod are not shared through the PVC venv.
+if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    echo "[entrypoint] installing build-essential for Triton/Inductor"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential
+fi
+CC="$(command -v gcc)"
+CXX="$(command -v g++)"
+export CC CXX
+"${CC}" --version >/dev/null
+"${CXX}" --version >/dev/null
+echo "[entrypoint] compilers OK — CC=${CC} CXX=${CXX}"
+
 python - <<'PY' || { echo "FATAL: venv is missing dependencies — rerun k8s/setup-venv.sh"; exit 1; }
 import sys
 # Report the REAL exception, not just the name we tried to import: everything is installed
