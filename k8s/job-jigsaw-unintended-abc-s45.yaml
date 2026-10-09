@@ -1,27 +1,20 @@
-# jigsaw-unintended-bias-in-toxicity-classification — three-arm experiment, DRAW 43, through the shared CLIProxyAPI.
+# jigsaw-unintended-bias-in-toxicity-classification — ABC experiment, seed 45.
+# Same model, resources and arm settings as job-jigsaw-unintended-abc-s44.yaml.
 #
-#   A  mlevolve-jubias-base-s43     no knowledge base
-#   B  mlevolve-jubias-kb-s43       KB on, draft-stage injection only
-#   C  mlevolve-jubias-kbimp-s43    KB on, draft AND improve stages
+#   A  mlevolve-jubias-base-s45     no knowledge base
+#   B  mlevolve-jubias-kb-s45       KB on, draft-stage injection only
+#   C  mlevolve-jubias-kbimp-s45    KB on, draft AND improve stages
 #
-#   kubectl apply  -f k8s/job-jigsaw-unintended-abc-s43.yaml     # 3 GPUs
-#   kubectl delete -f k8s/job-jigsaw-unintended-abc-s43.yaml
+#   kubectl apply -f k8s/job-jigsaw-unintended-abc-s45.yaml     # 3 GPUs
 #
-# Rationale, prepare-task command and the checks are in k8s/job-jigsaw-unintended-abc.yaml — read that file.
-#
-# prepare-task.sh does NOT need re-running for this seed: the data is already prepared and the
-# query/extraction caches are warm from draw 1. Confirm before launching rather than assuming —
-# a cold cache makes concurrent arms race, which is what invalidated the essay seed-42 draw:
-#
-#   kubectl exec <dev-pod> -- ls /workspace/data/mlebench/jigsaw-unintended-bias-in-toxicity-classification/prepared/public
-#
-# Launch this together with s44 if six GPUs are free. They are separated by seed, so the
-# 2026-08-25 draw-clustering fix keeps them as distinct draws even when started minutes apart —
-# but leave a gap anyway if convenient, since the seed is the only thing separating them.
+# Each Job generates 3 initial drafts and runs up to 3 candidates concurrently on 1 GPU.
+# SERVER_IDs 69-71 use grading ports 5074-5076.
+# Data preparation and cache checks: see k8s/job-jigsaw-unintended-abc.yaml.
+# Verify the shared data and retrieval caches are ready before launching the KB arms.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-base-s43
+  name: mlevolve-jubias-base-s45
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -62,13 +55,13 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-base-s43"
+          value: "jubias-base-s45"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "54"               # port 5059
+          value: "69"               # port 5074
         - name: EXTRA_RUN_ARGS
-          value: "agent.seed=43"
+          value: "agent.seed=45 agent.initial_drafts=3 agent.search.parallel_search_num=3 agent.search.num_gpus=1"
         # Route the agent through the shared proxy. These two are not secrets; the key is.
         # `env` takes precedence over `envFrom`, so this wins over any stale mlevolve-llm value.
         - name: LLM_BASE_URL
@@ -104,7 +97,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kb-s43
+  name: mlevolve-jubias-kb-s45
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -145,14 +138,15 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kb-s43"
+          value: "jubias-kb-s45"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "55"               # port 5060
+          value: "70"               # port 5075
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=43
+            agent.seed=45
+            agent.initial_drafts=3 agent.search.parallel_search_num=3 agent.search.num_gpus=1
             methodology_retrieval=lazy
             methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
             abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
@@ -191,7 +185,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mlevolve-jubias-kbimp-s43
+  name: mlevolve-jubias-kbimp-s45
   labels:
     app: mlevolve
     experiment: jigsaw-unintended-bias
@@ -232,14 +226,15 @@ spec:
         - name: REPO_DIR
           value: "/workspace/MLEvolve"
         - name: EXP_NAME
-          value: "jubias-kbimp-s43"
+          value: "jubias-kbimp-s45"
         - name: CPUS_PER_TASK
           value: "8"
         - name: SERVER_ID
-          value: "56"               # port 5061
+          value: "71"               # port 5076
         - name: EXTRA_RUN_ARGS
           value: >-
-            agent.seed=43
+            agent.seed=45
+            agent.initial_drafts=3 agent.search.parallel_search_num=3 agent.search.num_gpus=1
             methodology_retrieval=lazy
             methodology_kb_path=/workspace/Agentic_Knowledge_Base/methodology_kb
             abstract_index_path=/workspace/Agentic_Knowledge_Base/output/abstract_index
