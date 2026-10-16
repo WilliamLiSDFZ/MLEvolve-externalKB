@@ -42,6 +42,61 @@ git-ignored.
      `agent.code.* / agent.feedback.*` overrides.
    - Or edit `config/config.yaml` in the PVC checkout directly (the secret is optional).
 
+## Prepare unintended-bias data and techniques
+
+`job-prepare-jigsaw-unintended.yaml` runs the new corpus retriever on CPU (4 CPU,
+16Gi), using the existing PVC and venv. It prepares missing task data with
+`mlebench prepare`, then retrieves up to 100 papers, screens all chunks with Jev,
+and extracts task-specific techniques. It does not start training or inject the
+results, and does not call the legacy `prepare-task.sh`.
+
+Before submitting:
+
+- Update `/workspace/MLEvolve` on the PVC to include `corpus_retriever` and this
+  Job. Jobs execute that checkout, not the local checkout used by `kubectl`.
+- Use the existing `/workspace/MLEvolve/.venv`. If it predates corpus retrieval,
+  install `pymupdf4llm==0.0.27 pymupdf==1.26.3` there with `pip install --no-deps`.
+- Provide `/workspace/Agentic_Knowledge_Base/output/abstract_index/` with
+  `manifest.json`, `records.jsonl`, `embeddings.npy`, and access to its embedding
+  model/tokenizer. Model caches use `/workspace/hf_cache`.
+- Data is expected at `/workspace/data/mlebench/jigsaw-unintended-bias-in-toxicity-classification/prepared/public/`.
+  If not prepared, provide `/workspace/.kaggle/kaggle.json` and accept the
+  competition rules first. Existing prepared data skips downloading.
+- The same namespace must contain the existing `mlevolve-llm-proxy` Secret with
+  `LLM_API_KEY` and the `cliproxy` Service. The Job uses `gpt-5.6-terra`.
+- Create `mlevolve-jev` from a local credentials file containing
+  `TYPESAFE_API_KEY=...` (do not commit the credentials file):
+
+  ```bash
+  kubectl -n <NS> create secret generic mlevolve-jev --from-env-file=/path/to/jev.env
+  ```
+
+Submit and follow logs:
+
+```bash
+kubectl -n <NS> apply -f k8s/job-prepare-jigsaw-unintended.yaml
+kubectl -n <NS> logs -f job/mlevolve-prepare-jubias
+```
+
+Startup logs show each dependency import with its elapsed time. An import taking
+longer than 60 seconds prints a Python stack trace every minute until it finishes,
+so a stalled startup identifies the active module instead of remaining silent.
+
+Results replace the same PVC directory on each run:
+`/workspace/MLEvolve/cache/techinique/jigsaw-unintended-bias-in-toxicity-classification/`.
+Inspect `manifest.json` and `techniques.md`. A partial result exits with code 2,
+so Kubernetes marks the Job failed while retaining its diagnostic output.
+There are no automatic retries. The 24-hour deadline includes time waiting for
+the pod to start; the Job is removed three days after it finishes, while results
+remain on the PVC.
+
+To rerun after the previous Job has stopped, delete it and submit again:
+
+```bash
+kubectl -n <NS> delete job mlevolve-prepare-jubias --ignore-not-found --wait=true
+kubectl -n <NS> apply -f k8s/job-prepare-jigsaw-unintended.yaml
+```
+
 ## Launch a run
 
 ```bash

@@ -41,6 +41,51 @@ class FakeAgent(CorpusTechniqueAgent):
 
 
 class TechniqueAgentTests(unittest.TestCase):
+    def test_skip_then_extract_continues_to_next_selected_chunk(self):
+        chunks = [chunk("a", "General background."), chunk("b", "Use validation.")]
+        reason = "a: generic background; no actionable finding for this task."
+        found = technique("b")
+        agent = FakeAgent([action("next_selected", notes=reason),
+                           action(techniques=[found], notes=reason)], max_extra_reads=0)
+        with self.assertLogs("MLEvolve", level="INFO") as logs:
+            result = agent.extract(chunks, chunks, "Task", "Data")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["techniques"], [found])
+        self.assertEqual(result["read_chunk_ids"], ["a", "b"])
+        self.assertEqual(agent.prompts[1]["notes"], reason)
+        self.assertEqual(result["trace"][0]["technique_count"], 0)
+        output = "\n".join(logs.output)
+        self.assertIn("paper=paper chunk=a step=1/2", output)
+        self.assertIn("action=next_selected techniques=0", output)
+        self.assertIn("paper=paper chunk=b step=2/2", output)
+        self.assertIn("action=finish techniques=1", output)
+
+    def test_skip_after_extract_preserves_previous_technique(self):
+        chunks = [chunk("a", "Use validation."), chunk("b", "General background.")]
+        found = technique()
+        reason = "b: no useful additions; preserve the finding from a."
+        agent = FakeAgent([action("next_selected", techniques=[found]),
+                           action(techniques=[found], notes=reason)], max_extra_reads=0)
+        result = agent.extract(chunks, chunks, "Task", "Data")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["techniques"], [found])
+        self.assertEqual(agent.prompts[1]["techniques"], [found])
+        self.assertEqual(result["trace"][-1]["notes"], reason)
+        self.assertEqual(result["errors"], [])
+
+    def test_all_selected_chunks_can_be_skipped_with_complete_empty_result(self):
+        chunks = [chunk("a", "General background."), chunk("b", "Unrelated results.")]
+        notes = "a: generic; b: no plausible adaptation to this task."
+        agent = FakeAgent([action("next_selected", notes="a: generic."),
+                           action(notes=notes)], max_extra_reads=0)
+        result = agent.extract(chunks, chunks, "Task", "Data")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["techniques"], [])
+        self.assertEqual(result["read_chunk_ids"], ["a", "b"])
+        self.assertEqual(result["trace"][-1]["notes"], notes)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(agent.prompts), 2)
+
     def test_all_selected_are_read_even_after_early_finish(self):
         chunks = [chunk("a", "Use validation."), chunk("b", "More methods.")]
         found = technique()
@@ -57,7 +102,8 @@ class TechniqueAgentTests(unittest.TestCase):
         chunks = [chunk("a", "See the appendix."), chunk("b", "Use  validation.\n")]
         agent = FakeAgent([action("read_full_text", "b"),
                            action(techniques=[technique("b")])])
-        result = agent.extract(chunks, chunks[:1], "Task", "Data")
+        with self.assertNoLogs("MLEvolve", level="WARNING"):
+            result = agent.extract(chunks, chunks[:1], "Task", "Data")
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["read_chunk_ids"], ["a", "b"])
         self.assertEqual(result["trace"][0]["requested_chunk_id"], "b")
@@ -77,12 +123,41 @@ class TechniqueAgentTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["read_chunk_ids"], ["a", "c", "b"])
 
-    def test_unread_or_fabricated_quotes_are_not_successful(self):
+    def test_unread_or_invalid_evidence_chunks_are_not_successful(self):
         chunks = [chunk("a", "Use validation."), chunk("b", "Use validation.")]
-        for candidate in [technique("b"), technique("a", "Invented result")]:
+        for candidate in [technique("b"), technique("another-paper"), technique(None)]:
             with self.subTest(candidate=candidate):
                 result = FakeAgent([action(techniques=[candidate])]).extract(
                     chunks, chunks[:1], "Task", "Data")
+                self.assertEqual(result["status"], "incomplete")
+                self.assertEqual(result["techniques"], [])
+                self.assertTrue(result["errors"])
+
+    def test_nonmatching_quote_warns_and_preserves_results_without_skipping_chunks(self):
+        chunks = [chunk("a", "Use validation."), chunk("b", "More methods.")]
+        for quote in ['"Use validation."', "Use ... validation.", "Validate on held-out data."]:
+            with self.subTest(quote=quote):
+                found = technique("a", quote)
+                agent = FakeAgent([action(techniques=[found]), action(techniques=[found])])
+                with self.assertLogs("MLEvolve", level="WARNING") as logs:
+                    result = agent.extract(chunks, chunks, "Task", "Data")
+                self.assertEqual(result["status"], "complete")
+                self.assertEqual(result["techniques"], [found])
+                self.assertEqual(result["read_chunk_ids"], ["a", "b"])
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(agent.prompts[1]["techniques"], [found])
+                self.assertIn("quote", " ".join(logs.output).lower())
+
+    def test_missing_empty_or_nonstring_quotes_remain_invalid(self):
+        chunks = [chunk("a", "Use validation.")]
+        candidates = [technique("a", quote) for quote in ["", " \n", None, 123]]
+        missing_quote = technique()
+        del missing_quote["evidence"][0]["quote"]
+        candidates.append(missing_quote)
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                result = FakeAgent([action(techniques=[candidate])]).extract(
+                    chunks, chunks, "Task", "Data")
                 self.assertEqual(result["status"], "incomplete")
                 self.assertEqual(result["techniques"], [])
                 self.assertTrue(result["errors"])

@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,6 +140,48 @@ def _publish(staging, target):
         shutil.rmtree(previous)
 
 
+def _screen_and_extract(record, chunks, paper_dir, task_description, data_description, cfg, api_key):
+    settings = cfg.corpus_retriever
+    jev = JevReranker(api_key, model=settings.jev_model, threshold=settings.jev_threshold)
+    techniques = []
+    key = record["paper_key"]
+    try:
+        logger.info("[Corpus] paper %s: screening %d chunks", key, len(chunks))
+        selected, decisions = jev.filter(chunks, task_description, data_description)
+        _write_json(paper_dir / "screening.json", {
+            "chunks": [asdict(chunk) for chunk in chunks], "decisions": decisions,
+            "selected_chunk_ids": [chunk.id for chunk in selected]})
+        record["chunk_count"] = len(chunks)
+        record["selected_chunk_ids"] = [chunk.id for chunk in selected]
+        record["screening_complete"] = all(d["status"] == "ok" for d in decisions)
+        if selected:
+            logger.info("[Corpus] paper %s: extracting from %d selected chunks", key, len(selected))
+            result = CorpusTechniqueAgent(cfg).extract(
+                chunks, selected, task_description, data_description)
+            _write_json(paper_dir / "techniques.json", result)
+            record["status"] = result["status"]
+            record["technique_count"] = len(result["techniques"])
+            if result["status"] != "complete":
+                logger.warning("[Corpus] paper %s: incomplete extraction: %s", key, result.get("errors", []))
+            if result["status"] == "complete" and record["screening_complete"]:
+                techniques = [{**technique, "paper_key": key,
+                    "paper_id": record["paper_id"], "paper_title": record["paper_title"],
+                    "source": record["source"]} for technique in result["techniques"]]
+        else:
+            record["status"] = "rejected"
+        if not record["screening_complete"]:
+            record["status"] = "incomplete"
+    except (PermissionError, ImportError):
+        raise
+    except Exception as exc:
+        record["status"] = "error"
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        techniques = []
+        logger.warning("[Corpus] paper %s failed: %s", key, record["error"])
+    _write_json(paper_dir / "paper.json", record)
+    return record, techniques
+
+
 def run_retrieval(cfg, output_root=None):
     task_name = str(cfg.exp_id or "")
     if not re.fullmatch(r"[\w-][\w.-]*", task_name):
@@ -170,8 +213,6 @@ def run_retrieval(cfg, output_root=None):
     settings = cfg.corpus_retriever
     if not 0 <= settings.chunk_overlap < settings.chunk_tokens <= 10000:
         raise ValueError("Require 0 <= corpus_retriever.chunk_overlap < chunk_tokens <= 10000")
-    jev = JevReranker(api_key, model=settings.jev_model, threshold=settings.jev_threshold)
-    agent = CorpusTechniqueAgent(cfg)
     root = Path(output_root) if output_root is not None else OUTPUT_ROOT
     root.mkdir(parents=True, exist_ok=True)
     target = root / task_name
@@ -205,57 +246,74 @@ def run_retrieval(cfg, output_root=None):
                 "chunk_tokens": settings.chunk_tokens, "chunk_overlap": settings.chunk_overlap,
                 "technique_model": cfg.agent.code.model, "papers": [],
             }
-            all_techniques, seen = [], set()
+            unique, seen = [], set()
             for paper, score in candidates:
                 key = paper_key(paper)
                 if key in seen:
                     continue
                 seen.add(key)
-                paper_dir = staging / "papers" / key
-                paper_dir.mkdir(parents=True)
-                record = {"paper_key": key, "paper_id": getattr(paper, "id", None),
-                          "paper_title": getattr(paper, "title", ""),
-                          "abstract": getattr(paper, "abstract", "") or "",
-                          "source": getattr(paper, "source", "") or getattr(paper, "pdf_url", ""),
-                          "retrieval_score": float(score), "status": "error"}
-                logger.info("[Corpus] paper %d/%d: %s", len(seen), len(candidates), record["paper_title"])
+                unique.append((paper, score, key))
+            results, pending = {}, {}
+
+            def collect_ready(block=False):
+                if not pending:
+                    return
+                done, _ = wait(pending, timeout=None if block else 0,
+                               return_when=FIRST_COMPLETED)
+                for future in done:
+                    index = pending.pop(future)
+                    record, techniques = future.result()
+                    results[index] = (record, techniques)
+                    logger.info("[Corpus] completed %d/%d: paper %s, status=%s, techniques=%d",
+                                len(results), len(unique), record["paper_key"],
+                                record["status"], len(techniques))
+
+            logger.info("[Corpus] processing %d unique papers with up to 3 workers", len(unique))
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="corpus") as executor:
                 try:
-                    text = load_full_text(paper)
-                    (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
-                    record["fulltext_sha256"] = hashlib.sha256(text.encode()).hexdigest()
-                    chunks = split_paper(text, record["paper_id"], record["paper_title"],
-                                         record["abstract"], tokenizer,
-                                         max_tokens=settings.chunk_tokens, overlap=settings.chunk_overlap)
-                    selected, decisions = jev.filter(chunks, task_description, data_description)
-                    _write_json(paper_dir / "screening.json", {
-                        "chunks": [asdict(chunk) for chunk in chunks], "decisions": decisions,
-                        "selected_chunk_ids": [chunk.id for chunk in selected]})
-                    record["chunk_count"] = len(chunks)
-                    record["selected_chunk_ids"] = [chunk.id for chunk in selected]
-                    record["screening_complete"] = all(d["status"] == "ok" for d in decisions)
-                    if selected:
-                        result = agent.extract(chunks, selected, task_description, data_description)
-                        _write_json(paper_dir / "techniques.json", result)
-                        record["status"] = result["status"]
-                        record["technique_count"] = len(result["techniques"])
-                        if result["status"] != "complete":
-                            logger.warning("[Corpus] incomplete extraction: %s", result.get("errors", []))
-                        if result["status"] == "complete" and record["screening_complete"]:
-                            for technique in result["techniques"]:
-                                all_techniques.append({**technique, "paper_key": key,
-                                    "paper_id": record["paper_id"], "paper_title": record["paper_title"],
-                                    "source": record["source"]})
-                    else:
-                        record["status"] = "rejected"
-                    if not record["screening_complete"]:
-                        record["status"] = "incomplete"
-                except (PermissionError, ImportError):
+                    for index, (paper, score, key) in enumerate(unique):
+                        collect_ready(block=len(pending) == 3)
+                        paper_dir = staging / "papers" / key
+                        paper_dir.mkdir(parents=True)
+                        record = {"paper_key": key, "paper_id": getattr(paper, "id", None),
+                                  "paper_title": getattr(paper, "title", ""),
+                                  "abstract": getattr(paper, "abstract", "") or "",
+                                  "source": getattr(paper, "source", "") or getattr(paper, "pdf_url", ""),
+                                  "retrieval_score": float(score), "status": "error"}
+                        logger.info("[Corpus] preparing paper %d/%d (%s): %s",
+                                    index + 1, len(unique), key, record["paper_title"])
+                        try:
+                            # PyMuPDF is not thread-safe; prepare text and tokenizer slices here.
+                            text = load_full_text(paper)
+                            (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
+                            record["fulltext_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+                            chunks = split_paper(text, record["paper_id"], record["paper_title"],
+                                                 record["abstract"], tokenizer,
+                                                 max_tokens=settings.chunk_tokens, overlap=settings.chunk_overlap)
+                        except (PermissionError, ImportError):
+                            raise
+                        except Exception as exc:
+                            record["error"] = f"{type(exc).__name__}: {exc}"
+                            logger.warning("[Corpus] paper %s preparation failed: %s", key, record["error"])
+                            _write_json(paper_dir / "paper.json", record)
+                            results[index] = (record, [])
+                            continue
+                        collect_ready()
+                        pending[executor.submit(_screen_and_extract, record, chunks, paper_dir,
+                                                task_description, data_description, cfg, api_key)] = index
+                    while pending:
+                        collect_ready(block=True)
+                except BaseException:
+                    for future in pending:
+                        future.cancel()
+                    # Executor exit waits for running writers before staging is cleaned up.
                     raise
-                except Exception as exc:
-                    record["error"] = f"{type(exc).__name__}: {exc}"
-                    logger.warning("[Corpus] paper failed: %s", record["error"])
-                _write_json(paper_dir / "paper.json", record)
+
+            all_techniques = []
+            for index in range(len(unique)):
+                record, techniques = results[index]
                 manifest["papers"].append(record)
+                all_techniques.extend(techniques)
 
             counts = Counter(paper["status"] for paper in manifest["papers"])
             manifest["counts"] = dict(counts)

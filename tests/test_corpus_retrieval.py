@@ -2,12 +2,15 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock, get_ident
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from corpus_retriever import retrieval as rt
 from corpus_retriever.__main__ import main
+from corpus_retriever.technique_agent import CorpusTechniqueAgent
 
 
 class Tokenizer:
@@ -107,6 +110,165 @@ class CorpusPipelineTests(unittest.TestCase):
         self.assertEqual(len(result["papers"]), 1)
         self.assertEqual(self.load.call_count, 1)
 
+    def test_three_independent_workers_keep_preparation_and_results_in_order(self):
+        entered = {f"p{i}": Event() for i in range(1, 5)}
+        release = {key: Event() for key in entered}
+        finished = {key: Event() for key in entered}
+        lock = Lock()
+        active, peak = 0, 0
+        completed, preparation_threads, worker_threads = [], [], set()
+        caller_threads, jev_clients, agents = [], [], []
+
+        class RecordingTokenizer(Tokenizer):
+            def __call__(self, text, **kwargs):
+                preparation_threads.append(get_ident())
+                return super().__call__(text, **kwargs)
+
+        self.search.return_value = (
+            [(paper(i), 1.0) for i in range(1, 5)], RecordingTokenizer(), "query")
+
+        def load(_paper):
+            preparation_threads.append(get_ident())
+            return "A useful technique."
+
+        def extract_in_worker(chunks, selected, task, data):
+            nonlocal active, peak
+            identity = chunks[0].paper_id
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                worker_threads.add(get_ident())
+            entered[identity].set()
+            try:
+                self.assertTrue(release[identity].wait(5), identity)
+                result = extract(chunks, selected, task, data)
+                with lock:
+                    completed.append(identity)
+                return result
+            finally:
+                with lock:
+                    active -= 1
+                finished[identity].set()
+
+        def new_jev(*args, **kwargs):
+            client = Mock()
+            client.filter.side_effect = screen
+            jev_clients.append(client)
+            return client
+
+        def new_agent(*args, **kwargs):
+            agent = Mock()
+            agent.extract.side_effect = extract_in_worker
+            agents.append(agent)
+            return agent
+
+        def run():
+            caller_threads.append(get_ident())
+            return self.run_pipeline()
+
+        self.load.side_effect = load
+        with patch.object(rt, "JevReranker", side_effect=new_jev), \
+             patch.object(rt, "CorpusTechniqueAgent", side_effect=new_agent), \
+             ThreadPoolExecutor(max_workers=1) as caller:
+            future = caller.submit(run)
+            try:
+                for identity in ("p1", "p2", "p3"):
+                    self.assertTrue(entered[identity].wait(5), identity)
+                self.assertFalse(entered["p4"].is_set())
+                self.assertEqual(peak, 3)
+                for identity in ("p3", "p4", "p2", "p1"):
+                    self.assertTrue(entered[identity].wait(5), identity)
+                    release[identity].set()
+                    self.assertTrue(finished[identity].wait(5), identity)
+            finally:
+                for event in release.values():
+                    event.set()
+            result = future.result(timeout=5)
+
+        self.assertEqual(completed, ["p3", "p4", "p2", "p1"])
+        self.assertEqual(peak, 3)
+        self.assertEqual(len(worker_threads), 3)
+        self.assertEqual(set(preparation_threads), set(caller_threads))
+        self.assertTrue(worker_threads.isdisjoint(caller_threads))
+        self.assertEqual(len(jev_clients), 4)
+        self.assertEqual(len(agents), 4)
+        for client in jev_clients:
+            client.filter.assert_called_once()
+        for agent in agents:
+            agent.extract.assert_called_once()
+        self.assertEqual({agent.extract.call_args.args[0][0].paper_id for agent in agents},
+                         {"p1", "p2", "p3", "p4"})
+        self.assertEqual([record["paper_id"] for record in result["papers"]],
+                         ["p1", "p2", "p3", "p4"])
+        saved = json.loads((self.output / "task-a" / "techniques.json").read_text())
+        self.assertEqual([item["paper_id"] for item in saved], ["p1", "p2", "p3", "p4"])
+
+    def test_one_worker_failure_does_not_discard_other_papers(self):
+        self.search.return_value = ([(paper(i), 1.0) for i in range(1, 5)], Tokenizer(), "query")
+
+        def fail_one(chunks, *args):
+            if chunks[0].paper_id == "p2":
+                raise RuntimeError("bad paper response")
+            return extract(chunks, *args)
+
+        self.agent.extract.side_effect = fail_one
+        result = self.run_pipeline()
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["counts"], {"complete": 3, "error": 1})
+        self.assertEqual(result["papers"][1]["error"], "RuntimeError: bad paper response")
+        saved = json.loads((self.output / "task-a" / "techniques.json").read_text())
+        self.assertEqual([item["paper_id"] for item in saved], ["p1", "p3", "p4"])
+
+    def test_fatal_worker_waits_for_running_papers_before_removing_staging(self):
+        self.run_pipeline()
+        target = self.output / "task-a"
+        previous = (target / "manifest.json").read_bytes()
+        self.search.return_value = ([(paper(i), 1.0) for i in range(1, 5)], Tokenizer(), "query")
+        entered = {f"p{i}": Event() for i in range(1, 5)}
+        fail, shutting_down, release = Event(), Event(), Event()
+        completed = []
+
+        class RecordingExecutor(ThreadPoolExecutor):
+            def shutdown(self, *args, **kwargs):
+                shutting_down.set()
+                return super().shutdown(*args, **kwargs)
+
+        def extract_in_worker(chunks, *args):
+            identity = chunks[0].paper_id
+            entered[identity].set()
+            if identity == "p1":
+                self.assertTrue(fail.wait(5))
+                raise PermissionError("invalid credentials")
+            self.assertTrue(release.wait(5))
+            staging = [path for path in self.output.iterdir() if path.is_dir() and path != target]
+            self.assertEqual(len(staging), 1)
+            self.assertTrue((staging[0] / "papers" / rt.paper_key(paper(int(identity[1:]))) /
+                             "fulltext.md").exists())
+            completed.append(identity)
+            return extract(chunks, *args)
+
+        self.agent.extract.side_effect = extract_in_worker
+        with patch.object(rt, "ThreadPoolExecutor", RecordingExecutor), \
+             ThreadPoolExecutor(max_workers=1) as caller:
+            future = caller.submit(self.run_pipeline)
+            try:
+                for identity in ("p1", "p2", "p3"):
+                    self.assertTrue(entered[identity].wait(5), identity)
+                fail.set()
+                self.assertTrue(shutting_down.wait(5))
+                self.assertFalse(future.done())
+                self.assertFalse(entered["p4"].is_set())
+            finally:
+                fail.set()
+                release.set()
+            with self.assertRaises(PermissionError):
+                future.result(timeout=5)
+
+        self.assertEqual(set(completed), {"p2", "p3"})
+        self.assertFalse(entered["p4"].is_set())
+        self.assertEqual((target / "manifest.json").read_bytes(), previous)
+        self.assertEqual([path.name for path in self.output.iterdir() if path.is_dir()], ["task-a"])
+
     def test_normal_rejection_does_not_fall_back_to_unfiltered_papers(self):
         self.jev.filter.side_effect = lambda chunks, *_: ([], [
             {"chunk_id": c.id, "status": "ok", "score": 0.1, "selected": False} for c in chunks])
@@ -143,6 +305,26 @@ class CorpusPipelineTests(unittest.TestCase):
         result = self.run_pipeline()
         self.assertEqual(result["counts"], {"incomplete": 1})
         self.assertEqual(result["status"], "partial")
+
+    def test_quote_warning_still_publishes_the_papers_techniques(self):
+        agent = CorpusTechniqueAgent(self.cfg)
+        self.agent.extract.side_effect = agent.extract
+
+        def answer(prompt):
+            current = json.loads(prompt)["current_chunk"]
+            found = extract([], [SimpleNamespace(id=current["id"], content=current["content"])],
+                            "Task", "Data")["techniques"]
+            found[0]["evidence"][0]["quote"] = '"A useful technique."'
+            return {"action": "finish", "chunk_id": None, "notes": "", "techniques": found}
+
+        with patch.object(agent, "_query", side_effect=answer), \
+             self.assertLogs("MLEvolve", level="WARNING"):
+            result = self.run_pipeline()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["counts"], {"complete": 1})
+        self.assertEqual(result["technique_count"], 1)
+        saved = json.loads((self.output / "task-a" / "techniques.json").read_text())
+        self.assertEqual(saved[0]["evidence"][0]["quote"], '"A useful technique."')
 
     def test_all_failed_rerun_preserves_previous_task(self):
         self.run_pipeline()

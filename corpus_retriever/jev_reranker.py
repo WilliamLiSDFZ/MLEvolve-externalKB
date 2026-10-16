@@ -1,6 +1,7 @@
 """Screen complete paper chunks for experiment ideas relevant to one task."""
 
 import hashlib
+import logging
 import math
 import time
 from bisect import bisect_left
@@ -8,6 +9,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+
+logger = logging.getLogger("MLEvolve")
 
 
 JEV_PROMPT = """Does this paper chunk contain concrete information that could help
@@ -156,7 +159,8 @@ class JevReranker:
             context = nullcontext(self.client)
         selected, decisions = [], []
         with context as client:
-            for chunk in chunks:
+            for number, chunk in enumerate(chunks, 1):
+                logger.info("[Corpus] Jev chunk %d/%d (%s): screening", number, len(chunks), chunk.id)
                 decision = {"chunk_id": chunk.id, "paper_id": chunk.paper_id,
                             "score": None, "selected": None, "status": "error",
                             "error": None, "http_status": None, "usage": None, "model": self.model}
@@ -190,4 +194,6 @@ class JevReranker:
                     decision["error"] = f"{type(exc).__name__}: {exc}"
                     decision["http_status"] = getattr(getattr(exc, "response", None), "status_code", None)
                 decisions.append(decision)
+                logger.info("[Corpus] Jev chunk %s: status=%s, selected=%s, score=%s",
+                            chunk.id, decision["status"], decision["selected"], decision["score"])
         return selected, decisions

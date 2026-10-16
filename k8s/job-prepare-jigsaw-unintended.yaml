@@ -1,0 +1,152 @@
+# Prepare data and task-specific techniques; does not launch an MLEvolve experiment.
+# kubectl apply -f k8s/job-prepare-jigsaw-unintended.yaml
+# kubectl logs -f job/mlevolve-prepare-jubias
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-prepare-jubias
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-bias
+    stage: corpus-preparation
+spec:
+  backoffLimit: 0                 # Do not repeat paid API calls automatically.
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-bias
+        stage: corpus-preparation
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: prepare
+        # Same image as the dev pod that owns the PVC venv; no GPU requested.
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        workingDir: /workspace/MLEvolve
+        command: ["bash", "-c"]
+        args:
+        - |
+          set -euo pipefail
+          log() { printf '[%s] [prepare] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+          log "starting task $EXP_ID"
+          : "${LLM_API_KEY:?mlevolve-llm-proxy must provide LLM_API_KEY}"
+          : "${TYPESAFE_API_KEY:?mlevolve-jev must provide TYPESAFE_API_KEY}"
+          VENV_DIR="$PWD/.venv"
+          [ -f "$VENV_DIR/bin/activate" ] || {
+            echo "FATAL: build the PVC venv with k8s/setup-venv.sh on the dev pod first"
+            exit 1
+          }
+          source "$VENV_DIR/bin/activate"
+          [ "${VIRTUAL_ENV:-}" = "$VENV_DIR" ] || {
+            echo "FATAL: rebuild the venv on the dev pod; its activation path is incorrect"
+            exit 1
+          }
+          log "venv activated; checking retrieval dependencies"
+          python -u - <<'PY'
+          import faulthandler
+          import importlib
+          import time
+
+          def log(message):
+              stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+              print(f"[{stamp}] [prepare] {message}", flush=True)
+
+          faulthandler.enable()
+          for module, attribute in (
+              ("config", "Config"),
+              ("llm", "query"),
+              ("agents.memory.embedding_models", "EmbeddingModel"),
+              ("sentence_transformers", None),
+              ("faiss", None),
+              ("rank_bm25", None),
+              ("httpx", None),
+              ("pymupdf4llm", None),
+          ):
+              started = time.monotonic()
+              log(f"import {module}: starting")
+              faulthandler.dump_traceback_later(60, repeat=True)
+              try:
+                  loaded = importlib.import_module(module)
+                  if attribute:
+                      getattr(loaded, attribute)
+              except Exception:
+                  log(f"import {module}: FAILED after {time.monotonic() - started:.1f}s")
+                  raise
+              finally:
+                  faulthandler.cancel_dump_traceback_later()
+              log(f"import {module}: done in {time.monotonic() - started:.1f}s")
+          log("retrieval dependencies available")
+          PY
+          log "checking abstract index files"
+          for file in manifest.json records.jsonl embeddings.npy; do
+            [ -f "$ABSTRACT_INDEX_PATH/$file" ] || {
+              echo "FATAL: missing abstract index file: $ABSTRACT_INDEX_PATH/$file"
+              exit 1
+            }
+          done
+          log "preparing model cache directories"
+          mkdir -p "$HF_HOME" "$TORCH_HOME"
+          DATA_DIR="$DATASET_DIR/$EXP_ID/prepared/public"
+          DESC_FILE="$DATA_DIR/description.md"
+          log "checking prepared dataset"
+          if [ ! -f "$DESC_FILE" ]; then
+            [ -f "$KAGGLE_CONFIG_DIR/kaggle.json" ] || {
+              echo "FATAL: dataset not prepared; supply $KAGGLE_CONFIG_DIR/kaggle.json and accept the competition rules"
+              exit 1
+            }
+            log "preparing missing dataset with mlebench"
+            mlebench prepare -c "$EXP_ID" --data-dir "$DATASET_DIR"
+          else
+            log "using existing prepared dataset"
+          fi
+          [ -f "$DESC_FILE" ] || { echo "FATAL: missing $DESC_FILE after preparation"; exit 1; }
+          log "starting corpus retrieval; output: $PWD/cache/techinique/$EXP_ID/"
+          exec python -u -m corpus_retriever \
+            "exp_id=$EXP_ID" "desc_file=$DESC_FILE" "data_dir=$DATA_DIR" \
+            "abstract_index_path=$ABSTRACT_INDEX_PATH" retr_embedding_device=cpu lazy_pool=100
+        env:
+        - name: EXP_ID
+          value: jigsaw-unintended-bias-in-toxicity-classification
+        - name: DATASET_DIR
+          value: /workspace/data/mlebench
+        - name: ABSTRACT_INDEX_PATH
+          value: /workspace/Agentic_Knowledge_Base/output/abstract_index
+        - name: KAGGLE_CONFIG_DIR
+          value: /workspace/.kaggle
+        - name: HF_HOME
+          value: /workspace/hf_cache
+        - name: TRANSFORMERS_CACHE
+          value: /workspace/hf_cache
+        - name: TORCH_HOME
+          value: /workspace/torch_cache
+        - name: OMP_NUM_THREADS
+          value: "4"
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-5.6-terra
+        - name: TYPESAFE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mlevolve-jev
+              key: TYPESAFE_API_KEY
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: "4"
+            memory: 16Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol

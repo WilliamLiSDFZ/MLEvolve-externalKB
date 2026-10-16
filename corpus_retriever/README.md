@@ -6,6 +6,10 @@ extract techniques, or automatically inject these prepared results.
 
 ## Run
 
+For a CPU-only Kubernetes Job that prepares the unintended-bias task, see
+[`k8s/README.md`](../k8s/README.md#prepare-unintended-bias-data-and-techniques) and
+[`job-prepare-jigsaw-unintended.yaml`](../k8s/job-prepare-jigsaw-unintended.yaml).
+
 From the MLEvolve repository with its existing retrieval environment activated:
 
 ```bash
@@ -55,6 +59,15 @@ No TypeSafe SDK is required.
 5. Save task-specific proposals and source evidence. The original cross-task
    methodology cache is neither reused for extraction nor overwritten.
 
+PDF download/parsing and tokenization run on the main thread. A single pool of
+three workers screens and extracts up to three papers at once; each paper keeps
+its own agent state and reads chunks sequentially. Preparation and model calls
+overlap without queuing the entire corpus in memory. Results are aggregated in
+retrieval order, regardless of completion order. Logs identify the paper/chunk,
+stage, reading action, and completed-paper count. Ordinary paper failures remain
+isolated; fatal errors stop submission and wait for running workers before
+cleaning up the temporary output, preserving the previous task result.
+
 Jev defaults to pinned `jev-1.13.0` with a Noul threshold of `0.5`. Override with
 `corpus_retriever.jev_model=...` or `corpus_retriever.jev_threshold=...`.
 The threshold has not been calibrated for this task.
@@ -70,9 +83,20 @@ The technique agent reads one chunk per turn with bounded notes and cumulative
 techniques. Current bounds: 100,000 input characters, 6,000 note characters,
 40,000 result characters, and 32 additional reading calls beyond selected chunks.
 These are character budgets, not provider token counts. Exceeding a bound or
-returning invalid evidence produces `incomplete`, never a truncated success.
-Quotes must match a chunk actually read; this validates provenance, not whether
-the quote logically substantiates the model's claim.
+returning malformed evidence produces `incomplete`, never a truncated success.
+Jev selection does not require the agent to produce a technique. The agent judges
+whether a chunk offers a concrete, plausible task experiment or strengthens an
+existing technique. It may skip content without useful contributions by recording
+the reason in its notes and choosing `next_selected` (or `finish` on the last
+chunk), while carrying forward earlier useful techniques. All selected chunks
+are still read, and skipped chunks can be revisited. An entire paper yielding
+zero useful techniques is a successful empty result, not an extraction failure.
+Skipping uses the existing model turn; it does not avoid that chunk's input cost.
+Evidence must reference a chunk actually read and contain a nonempty quote.
+Quote text that does not exactly match the chunk produces a log warning only:
+the quote is preserved and extraction continues through the remaining chunks.
+Evidence therefore still needs review; neither textual fidelity nor support for
+the model's claim is guaranteed.
 
 Prompts are in `jev_reranker.py:JEV_PROMPT/JEV_CRITERIA` and
 `technique_agent.py:SYSTEM_PROMPT`; their exact text is saved with each result.
