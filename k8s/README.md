@@ -78,9 +78,8 @@ kubectl -n <NS> apply -f k8s/job-prepare-jigsaw-unintended.yaml
 kubectl -n <NS> logs -f job/mlevolve-prepare-jubias
 ```
 
-Startup logs show each dependency import with its elapsed time. An import taking
-longer than 60 seconds prints a Python stack trace every minute until it finishes,
-so a stalled startup identifies the active module instead of remaining silent.
+Startup logs show each dependency import's elapsed time after it completes or
+fails. Failed imports still print the exception traceback and stop the Job.
 
 Results replace the same PVC directory on each run:
 `/workspace/MLEvolve/cache/techinique/jigsaw-unintended-bias-in-toxicity-classification/`.

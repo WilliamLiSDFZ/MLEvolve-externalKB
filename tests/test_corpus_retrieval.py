@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from corpus_retriever import retrieval as rt
+from corpus_retriever import technique_deduplicator
 from corpus_retriever.__main__ import main
 from corpus_retriever.technique_agent import CorpusTechniqueAgent
 
@@ -41,6 +42,13 @@ def extract(chunks, selected, task, data):
                 "paper_reported_result": None}], "errors": [], "trace": []}
 
 
+def keep_all(techniques, cfg):
+    return techniques, {"status": "complete", "input_count": len(techniques),
+                        "output_count": len(techniques), "groups": [
+                            {"keep_id": item["technique_id"], "member_ids": [item["technique_id"]],
+                             "reason": "Distinct experiment"} for item in techniques]}
+
+
 class CorpusPipelineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -63,11 +71,13 @@ class CorpusPipelineTests(unittest.TestCase):
         patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}).start()
         self.search = patch.object(rt, "search_papers", return_value=(
             [(paper(1), 1.0)], Tokenizer(), "search query")).start()
-        self.load = patch.object(rt, "load_full_text", return_value="A useful technique.").start()
+        self.load = patch.object(rt, "load_full_text",
+                                 side_effect=lambda paper: f"A useful technique for {paper.id}.").start()
         self.jev = patch.object(rt, "JevReranker").start().return_value
         self.jev.filter.side_effect = screen
         self.agent = patch.object(rt, "CorpusTechniqueAgent").start().return_value
         self.agent.extract.side_effect = extract
+        self.deduplicate = patch.object(rt, "deduplicate_techniques", side_effect=keep_all).start()
 
     def run_pipeline(self):
         return rt.run_retrieval(self.cfg, self.output)
@@ -95,6 +105,7 @@ class CorpusPipelineTests(unittest.TestCase):
         self.assertEqual(self.agent.extract.call_count, 23)
 
     def test_late_fulltext_is_preserved_and_all_selected_chunks_reach_agent(self):
+        self.load.side_effect = None
         self.load.return_value = "x" * 65000 + "LATE METHOD"
         self.run_pipeline()
         chunks, selected, _, _ = self.agent.extract.call_args.args
@@ -109,6 +120,101 @@ class CorpusPipelineTests(unittest.TestCase):
         result = self.run_pipeline()
         self.assertEqual(len(result["papers"]), 1)
         self.assertEqual(self.load.call_count, 1)
+
+    def test_duplicate_fulltext_with_different_ids_skips_screening_and_extraction(self):
+        self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
+        self.load.side_effect = None
+        self.load.return_value = "The same paper under different corpus identifiers."
+        result = self.run_pipeline()
+        self.assertEqual(self.load.call_count, 2)
+        self.jev.filter.assert_called_once()
+        self.agent.extract.assert_called_once()
+        self.assertEqual(result["counts"], {"complete": 1, "duplicate": 1})
+        duplicate = result["papers"][1]
+        self.assertEqual(duplicate["duplicate_of"], rt.paper_key(paper(1)))
+        self.assertEqual(duplicate["fulltext_sha256"], result["papers"][0]["fulltext_sha256"])
+        saved = self.output / "task-a" / "papers" / rt.paper_key(paper(2))
+        self.assertEqual(json.loads((saved / "paper.json").read_text()), duplicate)
+        self.assertFalse((saved / "fulltext.md").exists())
+        self.assertFalse((saved / "screening.json").exists())
+        self.assertFalse((saved / "techniques.json").exists())
+
+    def test_failed_chunk_preparation_does_not_mark_fulltext_as_processed(self):
+        self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
+        self.load.side_effect = None
+        self.load.return_value = "The same full text."
+        split = rt.split_paper
+
+        def fail_first(text, paper_id, *args, **kwargs):
+            if paper_id == "p1":
+                raise ValueError("bad chunk preparation")
+            return split(text, paper_id, *args, **kwargs)
+
+        with patch.object(rt, "split_paper", side_effect=fail_first):
+            result = self.run_pipeline()
+        self.assertEqual(result["counts"], {"error": 1, "complete": 1})
+        self.jev.filter.assert_called_once()
+        self.assertEqual(self.agent.extract.call_args.args[0][0].paper_id, "p2")
+
+    def test_llm_dedup_retains_original_record_and_all_per_paper_outputs(self):
+        self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
+        self.deduplicate.side_effect = technique_deduplicator.deduplicate_techniques
+        first_id, second_id = (f"{rt.paper_key(paper(i))}:0000" for i in (1, 2))
+
+        def answer(prompt, cfg):
+            items = json.loads(prompt)["techniques"]
+            self.assertEqual([item["technique_id"] for item in items], [first_id, second_id])
+            return {"groups": [{"keep_id": second_id, "member_ids": [first_id, second_id],
+                                "reason": "Both propose the same comparison"}]}
+
+        with patch.object(technique_deduplicator, "_query", side_effect=answer):
+            result = self.run_pipeline()
+        self.assertEqual(result["raw_technique_count"], 2)
+        self.assertEqual(result["technique_count"], 1)
+        self.assertEqual(result["status"], "complete")
+        target = self.output / "task-a"
+        saved = json.loads((target / "techniques.json").read_text())
+        originals = self.deduplicate.call_args.args[0]
+        self.assertEqual(saved, [originals[1]])
+        self.assertEqual(saved[0]["technique_id"], second_id)
+        for i in (1, 2):
+            raw = json.loads((target / "papers" / rt.paper_key(paper(i)) / "techniques.json").read_text())
+            self.assertEqual(len(raw["techniques"]), 1)
+            self.assertNotIn("technique_id", raw["techniques"][0])
+        audit = json.loads((target / "deduplication.json").read_text())
+        self.assertEqual(audit["groups"][0]["member_ids"], [first_id, second_id])
+        self.assertEqual(result["deduplication"],
+                         {"status": "complete", "input_count": 2, "output_count": 1})
+        prompts = json.loads((target / "prompts.json").read_text())
+        self.assertEqual(prompts["technique_deduplication"], technique_deduplicator.SYSTEM_PROMPT)
+
+    def test_dedup_failure_keeps_all_techniques_and_marks_partial(self):
+        self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
+        for error in (ValueError("invalid groups"), RuntimeError("service unavailable")):
+            with self.subTest(error=error):
+                self.deduplicate.side_effect = error
+                result = self.run_pipeline()
+                self.assertEqual(result["status"], "partial")
+                self.assertEqual(result["raw_technique_count"], 2)
+                self.assertEqual(result["technique_count"], 2)
+                target = self.output / "task-a"
+                saved = json.loads((target / "techniques.json").read_text())
+                self.assertEqual([item["paper_id"] for item in saved], ["p1", "p2"])
+                audit = json.loads((target / "deduplication.json").read_text())
+                self.assertEqual(audit["status"], "incomplete")
+                self.assertIn(str(error), audit["error"])
+
+    def test_fatal_dedup_failure_preserves_previous_task_result(self):
+        self.run_pipeline()
+        target = self.output / "task-a"
+        previous = (target / "manifest.json").read_bytes()
+        for error in (PermissionError("invalid credentials"), ImportError("missing client")):
+            with self.subTest(error=error):
+                self.deduplicate.side_effect = error
+                with self.assertRaises(type(error)):
+                    self.run_pipeline()
+                self.assertEqual((target / "manifest.json").read_bytes(), previous)
+                self.assertEqual([p.name for p in self.output.iterdir() if p.is_dir()], ["task-a"])
 
     def test_three_independent_workers_keep_preparation_and_results_in_order(self):
         entered = {f"p{i}": Event() for i in range(1, 5)}
@@ -129,7 +235,7 @@ class CorpusPipelineTests(unittest.TestCase):
 
         def load(_paper):
             preparation_threads.append(get_ident())
-            return "A useful technique."
+            return f"A useful technique for {_paper.id}."
 
         def extract_in_worker(chunks, selected, task, data):
             nonlocal active, peak
@@ -278,6 +384,7 @@ class CorpusPipelineTests(unittest.TestCase):
         self.agent.extract.assert_not_called()
 
     def test_partial_screening_does_not_publish_techniques_as_complete(self):
+        self.load.side_effect = None
         self.load.return_value = "x" * 11000
         self.jev.filter.side_effect = lambda chunks, *_: (chunks[:1], [
             {"chunk_id": c.id, "status": "ok" if i == 0 else "error"}

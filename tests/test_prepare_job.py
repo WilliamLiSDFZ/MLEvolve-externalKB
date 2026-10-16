@@ -114,8 +114,9 @@ echo task > "$DATASET_DIR/$EXP_ID/prepared/public/description.md"
         result = subprocess.run(["bash", "-n"], input=self.script, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_dependency_failure_reports_progress_and_stops(self):
+    def test_dependency_failure_reports_elapsed_time_and_stops(self):
         preflight = self.script.split("python -u - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        self.assertNotIn("faulthandler", preflight)
         fake_imports = '''
 import importlib
 from types import SimpleNamespace
@@ -128,10 +129,9 @@ importlib.import_module = fake_import
         result = subprocess.run([sys.executable, "-u", "-"], input=fake_imports + preflight,
                                 capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("import config: starting", result.stdout)
-        self.assertIn("import config: done in", result.stdout)
-        self.assertIn("import llm: starting", result.stdout)
-        self.assertIn("import llm: FAILED after", result.stdout)
+        self.assertNotIn(": starting", result.stdout)
+        self.assertRegex(result.stdout, r"import config: done in \d+\.\d+s")
+        self.assertRegex(result.stdout, r"import llm: FAILED after \d+\.\d+s")
         self.assertIn("ImportError: test dependency failure: llm", result.stderr)
         self.assertNotIn("import agents.memory.embedding_models", result.stdout)
         self.assertNotIn("retrieval dependencies available", result.stdout)

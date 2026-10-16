@@ -46,7 +46,6 @@ spec:
           }
           log "venv activated; checking retrieval dependencies"
           python -u - <<'PY'
-          import faulthandler
           import importlib
           import time
 
@@ -54,7 +53,6 @@ spec:
               stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
               print(f"[{stamp}] [prepare] {message}", flush=True)
 
-          faulthandler.enable()
           for module, attribute in (
               ("config", "Config"),
               ("llm", "query"),
@@ -66,8 +64,6 @@ spec:
               ("pymupdf4llm", None),
           ):
               started = time.monotonic()
-              log(f"import {module}: starting")
-              faulthandler.dump_traceback_later(60, repeat=True)
               try:
                   loaded = importlib.import_module(module)
                   if attribute:
@@ -75,8 +71,6 @@ spec:
               except Exception:
                   log(f"import {module}: FAILED after {time.monotonic() - started:.1f}s")
                   raise
-              finally:
-                  faulthandler.cancel_dump_traceback_later()
               log(f"import {module}: done in {time.monotonic() - started:.1f}s")
           log("retrieval dependencies available")
           PY

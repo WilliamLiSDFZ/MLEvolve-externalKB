@@ -50,14 +50,24 @@ No TypeSafe SDK is required.
    supplied public-data directory. Omitted data and resources remain unknown.
 2. Reuse centered hybrid abstract search with `lazy_pool=100` and the existing
    `lazy_min_score` relative cutoff. Fewer than 100 candidates may remain.
-3. Download each unique candidate once and parse the full PDF without the old
-   64,000-character cutoff. Ask Jev about **every chunk**, including chunks after
-   the first positive.
+3. Download each candidate and parse the full PDF without the old 64,000-character
+   cutoff. Skip repeated paper IDs, then skip identical parsed-text SHA-256 hashes
+   before chunking/model calls, recording `duplicate_of` for repeated content.
+   Ask Jev about **every chunk** of the remaining papers, including chunks after
+   the first positive. Different PDF versions or extraction text can have
+   different hashes and are not fuzzy-matched.
 4. Run `CorpusTechniqueAgent` on every retained paper, without the old 15-paper
    ceiling or 20-paper extraction cap. It reads all selected chunks and can
    request any other chunk of the same paper through `read_full_text`.
-5. Save task-specific proposals and source evidence. The original cross-task
-   methodology cache is neither reused for extraction nor overwritten.
+5. Deduplicate the complete proposals with one LLM call using only their stable
+   IDs, names, paper IDs/titles, paper findings, and proposed experiments.
+   This final step only groups equivalent experiments; it does not judge value,
+   feasibility, or relevance. Every proposal must belong to exactly one group,
+   with distinct proposals kept as singletons. Materially different methods,
+   ablations, controls, or negative findings remain separate.
+6. Save original representatives, source evidence, and the grouping decisions.
+   The original cross-task methodology cache is neither reused for extraction
+   nor overwritten.
 
 PDF download/parsing and tokenization run on the main thread. A single pool of
 three workers screens and extracts up to three papers at once; each paper keeps
@@ -99,7 +109,19 @@ Evidence therefore still needs review; neither textual fidelity nor support for
 the model's claim is guaranteed.
 
 Prompts are in `jev_reranker.py:JEV_PROMPT/JEV_CRITERIA` and
-`technique_agent.py:SYSTEM_PROMPT`; their exact text is saved with each result.
+`technique_agent.py:SYSTEM_PROMPT`, with the final deduplication prompt in
+`technique_deduplicator.py:SYSTEM_PROMPT`; their exact text is saved with each result.
+
+Final deduplication uses the existing `agent.code` model and returns only groups
+of IDs and reasons. The program checks that IDs exist, groups do not overlap,
+representatives belong to their groups, and all proposals are accounted for.
+It then selects original records in retrieval order without rewriting their
+findings or evidence. Zero/one proposal needs no model call. The input is bounded
+at 200,000 characters including the system prompt, with 8,192 output tokens;
+the character bound is not a guarantee of fitting a provider's token window.
+Oversized requests, ordinary service errors, or invalid groupings retain every
+original proposal and mark the run `partial`; nothing is silently truncated.
+Authentication or dependency failures remain fatal and preserve the prior run.
 
 ## Results and replacement
 
@@ -110,15 +132,23 @@ requested spelling and **no run ID**:
 <exp_id>/
   manifest.json              # settings, counts, statuses and source fingerprints
   task_context.json          # exact task description and data preview
-  prompts.json               # screening and extraction prompts
-  techniques.json            # aggregate from fully completed papers
+  prompts.json               # screening, extraction and deduplication prompts
+  techniques.json            # deduplicated aggregate from fully completed papers
   techniques.md              # readable version of that aggregate
+  deduplication.json         # retained/member IDs, reasons, counts, status/errors
   papers/<paper_key>/
     paper.json               # title, abstract, source, retrieval score and status
     fulltext.md               # complete parsed text, also used by the reader
     screening.json            # chunks, scores, errors and selected chunk IDs
     techniques.json           # adaptations, evidence, reading trace and errors
 ```
+
+Aggregate techniques have IDs `<paper_key>:<zero-based technique index>`.
+`manifest.json` records both `raw_technique_count` and final `technique_count`,
+plus deduplication status. Per-paper `techniques.json` files retain all original
+extractions, including entries represented by another technique in the aggregate.
+Exact duplicate papers retain a `paper.json` pointing to the first paper's key;
+they do not repeat its full text, screening, or extraction files.
 
 Repeating the command performs retrieval/screening/extraction again and replaces
 the same task directory, removing stale papers. Processing uses a temporary
@@ -127,8 +157,8 @@ missing dependencies leave the previous result unchanged. An entirely failed
 rerun also preserves it. A local file lock rejects concurrent preparation of
 the same task.
 
-A finished run with some unresolved papers publishes a clearly marked `partial`
-result, replacing the prior directory. Incomplete papers retain diagnostic
+A finished run with some unresolved papers or failed final deduplication publishes
+a clearly marked `partial` result, replacing the prior directory. Incomplete papers retain diagnostic
 files, but their techniques are excluded from the aggregate. Inspect
 `manifest.json` and the per-paper records before using a result.
 

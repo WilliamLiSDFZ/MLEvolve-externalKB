@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .jev_reranker import JEV_CRITERIA, JEV_PROMPT, JevReranker, split_paper
 from .technique_agent import SYSTEM_PROMPT, CorpusTechniqueAgent
+from .technique_deduplicator import SYSTEM_PROMPT as DEDUPLICATION_PROMPT, deduplicate_techniques
 
 logger = logging.getLogger("MLEvolve")
 OUTPUT_ROOT = Path(__file__).resolve().parents[1] / "cache" / "techinique"
@@ -164,9 +165,9 @@ def _screen_and_extract(record, chunks, paper_dir, task_description, data_descri
             if result["status"] != "complete":
                 logger.warning("[Corpus] paper %s: incomplete extraction: %s", key, result.get("errors", []))
             if result["status"] == "complete" and record["screening_complete"]:
-                techniques = [{**technique, "paper_key": key,
+                techniques = [{**technique, "technique_id": f"{key}:{index:04d}", "paper_key": key,
                     "paper_id": record["paper_id"], "paper_title": record["paper_title"],
-                    "source": record["source"]} for technique in result["techniques"]]
+                    "source": record["source"]} for index, technique in enumerate(result["techniques"])]
         else:
             record["status"] = "rejected"
         if not record["screening_complete"]:
@@ -231,7 +232,8 @@ def run_retrieval(cfg, output_root=None):
                        "available_data": data_description}
             _write_json(staging / "task_context.json", context)
             _write_json(staging / "prompts.json", {"jev": JEV_PROMPT, "jev_criteria": JEV_CRITERIA,
-                                                   "technique_agent": SYSTEM_PROMPT})
+                                                   "technique_agent": SYSTEM_PROMPT,
+                                                   "technique_deduplication": DEDUPLICATION_PROMPT})
             candidates, tokenizer, query = search_papers(task_description, cfg)
             manifest = {
                 "task_name": task_name, "created_at": datetime.now(timezone.utc).isoformat(),
@@ -254,6 +256,7 @@ def run_retrieval(cfg, output_root=None):
                 seen.add(key)
                 unique.append((paper, score, key))
             results, pending = {}, {}
+            fulltext_papers = {}
 
             def collect_ready(block=False):
                 if not pending:
@@ -285,11 +288,20 @@ def run_retrieval(cfg, output_root=None):
                         try:
                             # PyMuPDF is not thread-safe; prepare text and tokenizer slices here.
                             text = load_full_text(paper)
-                            (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
                             record["fulltext_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+                            duplicate_of = fulltext_papers.get(record["fulltext_sha256"])
+                            if duplicate_of is not None:
+                                record.update(status="duplicate", duplicate_of=duplicate_of)
+                                _write_json(paper_dir / "paper.json", record)
+                                results[index] = (record, [])
+                                logger.info("[Corpus] paper %s: duplicate full text of %s; skipping",
+                                            key, duplicate_of)
+                                continue
+                            (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
                             chunks = split_paper(text, record["paper_id"], record["paper_title"],
                                                  record["abstract"], tokenizer,
                                                  max_tokens=settings.chunk_tokens, overlap=settings.chunk_overlap)
+                            fulltext_papers[record["fulltext_sha256"]] = key
                         except (PermissionError, ImportError):
                             raise
                         except Exception as exc:
@@ -317,10 +329,28 @@ def run_retrieval(cfg, output_root=None):
 
             counts = Counter(paper["status"] for paper in manifest["papers"])
             manifest["counts"] = dict(counts)
-            manifest["technique_count"] = len(all_techniques)
-            manifest["status"] = "partial" if counts["error"] or counts["incomplete"] else "complete"
             if manifest["papers"] and not (counts["complete"] or counts["rejected"]) and target.exists():
                 raise RuntimeError("No paper completed successfully; previous task results were preserved")
+            manifest["raw_technique_count"] = len(all_techniques)
+            logger.info("[Corpus] deduplicating %d extracted techniques", len(all_techniques))
+            try:
+                all_techniques, deduplication = deduplicate_techniques(all_techniques, cfg)
+            except (PermissionError, ImportError):
+                raise
+            except Exception as exc:
+                deduplication = {"status": "incomplete", "input_count": len(all_techniques),
+                                 "output_count": len(all_techniques),
+                                 "error": f"{type(exc).__name__}: {exc}"}
+                logger.warning("[Corpus] technique deduplication failed; keeping all %d techniques: %s",
+                               len(all_techniques), deduplication["error"])
+            _write_json(staging / "deduplication.json", deduplication)
+            manifest["deduplication"] = {key: deduplication[key]
+                                         for key in ("status", "input_count", "output_count")}
+            manifest["technique_count"] = len(all_techniques)
+            manifest["status"] = "partial" if (counts["error"] or counts["incomplete"] or
+                                                deduplication["status"] != "complete") else "complete"
+            logger.info("[Corpus] technique deduplication %s: %d -> %d",
+                        deduplication["status"], deduplication["input_count"], len(all_techniques))
             _write_json(staging / "manifest.json", manifest)
             _write_json(staging / "techniques.json", all_techniques)
             (staging / "techniques.md").write_text(_render(all_techniques), encoding="utf-8")
