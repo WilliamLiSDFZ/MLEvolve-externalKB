@@ -692,7 +692,7 @@ def build_lazy_guidance(task_desc: str, cfg: Any) -> str:
         return ""
 
     retr = _load_abstract_index(index_dir, cfg)
-    pool = int(getattr(cfg, "lazy_pool", 40))
+    pool = int(getattr(cfg, "lazy_pool", 100))
     query = _build_query(task_desc, cfg)
     logger.info(f"[Lazy] query: {len(query)} chars (from {len(task_desc)} char description)")
     hits = retr.search(query, top_k=pool,

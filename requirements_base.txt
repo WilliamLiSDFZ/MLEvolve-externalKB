@@ -316,6 +316,9 @@ pure_eval==0.2.3
 py-cpuinfo==9.0.0
 pyparsing==3.2.1
 pypdf==5.4.0
+# Full-text paper parsing for manual corpus retrieval (--no-deps installs).
+pymupdf4llm==0.0.27
+pymupdf==1.26.3
 pytest==7.4.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1

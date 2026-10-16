@@ -193,18 +193,10 @@ def trim_methodology_text(text: str, token_budget: int) -> str:
 
 
 def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
-    """Return the PRETRAINED-MODEL guidance, and stash literature techniques on the config.
+    """Return pretrained-model guidance without retrieving or injecting literature.
 
-    The two used to be concatenated into one string. That was a mislabelling bug: draft_agent
-    renders this return value inside a block headed "Pretrained Model Strategy" whose
-    Option A is annotated "SOTA models with proven performance" and followed by "you MUST copy
-    the Code template EXACTLY". Appending paper-derived techniques there presented them to the
-    model as pretrained-model recommendations under an instruction that does not apply to them.
-
-    They are now kept apart: the return value is the model guidance only, and the retrieved
-    techniques go to `cfg.coldstart.methodology_text` for callers to render under their own
-    heading. Consumers: draft_agent (its own section) and, when
-    `coldstart.inject_into_improve` is set, improve_agent.
+    Paper retrieval is a separate, manually started preparation step. Task-specific
+    techniques are not loaded here until their injection policy is defined.
     """
     tasks = _load_json(cfg.coldstart.task_json_path)
     models = _load_json(cfg.coldstart.model_json_path)
@@ -213,58 +205,13 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
     if torch_hub_dir:
         text = text.replace("{TORCH_HUB_DIR}", torch_hub_dir.rstrip("/"))
 
-    # Methodology / literature KB retrieval (opt-in: only when methodology_kb_path is set).
-    # Mode: "vector" (semantic retrieval) | "llm" (category match) | "static" (methodology_map.json)
-    #     | "lazy" (abstract index + on-demand extraction)
-    methodology_text = ""
-    methodology_kb_path = getattr(cfg, "methodology_kb_path", "") or ""
-    if methodology_kb_path:
-        mode = str(getattr(cfg, "methodology_retrieval", "vector")).lower()
-        if mode == "static" or not task_desc:
-            methodology_text = _build_methodology_text(cfg.exp_id, methodology_kb_path)
-        else:
-            from engine.coldstart.methodology_agent import build_methodology_guidance
-            methodology_text = build_methodology_guidance(task_desc, methodology_kb_path, cfg)
-
-    try:
-        cfg.coldstart.methodology_text = methodology_text or ""
-    except Exception:  # pragma: no cover - config objects are OmegaConf/dataclass, both settable
-        logger.warning("could not store methodology_text on cfg.coldstart; "
-                       "literature techniques will not be injected")
-
-    if methodology_text:
-        logger.info("Knowledge injected at draft: %d chars, digest %s\n%s",
-                    len(methodology_text), text_digest(methodology_text),
-                    preview_text(methodology_text))
-        # Also dump the FULL text next to the journal. The log preview is elided to keep the
-        # log readable, which means a finished run does not record what knowledge it actually
-        # received — and without that, "did the agent use the retrieved techniques?" cannot be
-        # answered afterwards from the run directory alone. It is a few KB, write-only, and it
-        # makes every run self-documenting. Failure here must never affect the run.
-        try:
-            log_dir = Path(getattr(cfg, "log_dir", "") or ".")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            (log_dir / "injected_knowledge.md").write_text(methodology_text, encoding="utf-8")
-        except Exception as e:  # pragma: no cover - diagnostics must not break a 12 h run
-            logger.warning("could not write injected_knowledge.md: %s", e)
-    elif methodology_kb_path:
-        logger.info("Knowledge injected at draft: NOTHING (kb path set but retrieval "
-                    "returned empty) — this arm is running as an expensive baseline")
-
-    # Record WHAT THE CORPUS CONTAINED, separately from what was injected. Deliberately outside
-    # the `if methodology_text` branch: a run that retrieved nothing is exactly the case where
-    # knowing which venues were in the pool matters most.
-    #
-    # The IMPORT is inside the try, not just the call. kb_snapshot.py is a separate file, and a
-    # deploy that copies knowledge.py without it raises ImportError here — in a function every
-    # arm calls, at cold start, killing the job in the first minute. That happened: essay s47
-    # died with BackoffLimitExceeded before writing a single node. A diagnostic must not be able
-    # to end a run, and "must not" has to include failing to load.
-    try:
-        from engine.coldstart.kb_snapshot import write_kb_snapshot
-        write_kb_snapshot(cfg)
-    except Exception as e:  # pragma: no cover
-        logger.warning("KB snapshot unavailable (%s: %s) — continuing without it",
-                       type(e).__name__, e)
-
+    cfg.coldstart.methodology_text = ""
+    mode = str(getattr(cfg, "methodology_retrieval", "") or "").lower()
+    if (getattr(cfg, "methodology_kb_path", "")
+            or mode in {"static", "vector", "llm", "lazy"}):
+        logger.warning(
+            "Automatic literature retrieval is disabled; legacy methodology settings "
+            "are ignored. Run python -m corpus_retriever manually before experiments. "
+            "Task-specific techniques are not automatically injected."
+        )
     return text

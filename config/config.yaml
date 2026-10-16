@@ -22,13 +22,20 @@ cpu_number: 21
 # Model paths
 torch_hub_dir: ""       # path to torch hub cache, e.g. /data/pretrain_models/torch_models
 pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_models
-methodology_kb_path: ""       # vector/llm/static: KB with index|insight.md; lazy: methodology_kb ROOT (extraction cache tree). empty = off
-methodology_retrieval: vector # vector = insight-index retrieval | llm = LLM category match | static = methodology_map.json | lazy = abstract-index + on-demand extraction
+methodology_kb_path: ""       # legacy setting; training no longer retrieves paper techniques
+methodology_retrieval: none   # automatic literature retrieval retired; use python -m corpus_retriever
 
-# --- lazy mode (methodology_retrieval: lazy) ---
+# --- manual corpus retrieval (python -m corpus_retriever) ---
 abstract_index_path: ""       # dir with the abstract index (records.jsonl/embeddings.npy/manifest.json)
-lazy_pool: 40                 # abstract-retrieval candidates (recall-oriented)
+lazy_pool: 100                # maximum abstract-retrieval candidates for manual preparation
 lazy_min_score: 0.05          # LOW relative threshold (precision recovered at assembly)
+corpus_retriever:
+  jev_model: jev-1.13.0        # pinned so provider aliases cannot change a prepared result
+  jev_threshold: 0.5          # initial screening threshold, not a calibrated recall guarantee
+  chunk_tokens: 10000         # index model's local tokenizer, not Jev's private tokenizer
+  chunk_overlap: 200
+
+# Legacy extraction/filter settings below do not govern manual corpus retrieval.
 max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
 lazy_extract_workers: 4       # concurrent PDF+LLM extractions
 lazy_technique_rerank: True   # True = 2nd-stage technique-level retrieval over extracted content | False = inject paper-level, ranked by abstract score

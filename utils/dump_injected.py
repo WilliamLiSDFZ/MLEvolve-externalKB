@@ -1,25 +1,10 @@
-"""Recover `injected_knowledge.md` for runs that finished before it was written.
+"""Verify saved literature injections from historical runs without replaying retrieval.
 
-Runs launched before 2026-08-19 recorded only an elided preview of the injected techniques, so
-what knowledge they received is not in the run directory. Retrieval is deterministic given the
-task description, the abstract index, the cached distilled query and the extracted papers — all
-of which live on the pod — so the text can be regenerated.
+Automatic coldstart retrieval has been retired. Missing historical injections cannot
+be reconstructed by this version, and task-specific retrieval caches are not evidence
+of what an old experiment received. This command never modifies run artifacts.
 
-The catch is that the knowledge base has grown since those runs. A regenerated text is only the
-one that run actually saw if the corpus and query are unchanged, and there is no way to tell by
-inspection. So this script never trusts the replay: it compares sha1[:8] of the regenerated text
-against the `digest` the run logged at the time, and writes the file ONLY on a match.
-
-    python utils/dump_injected.py --runs /workspace/MLEvolve/runs           # report only
-    python utils/dump_injected.py --runs /workspace/MLEvolve/runs --write   # write on match
-
-Expect partial success. A mismatch is not a failure of this script — it means the KB moved, and
-that run genuinely cannot be measured. Say so in the writeup rather than substituting today's
-retrieval for what the run saw; that would silently score nodes against techniques they were
-never given.
-
-Runs no new LLM calls: extraction is capped at 0 so only already-extracted papers are used. If
-the distilled query is not in the cache the replay is skipped rather than paying for a new one.
+    python utils/dump_injected.py --runs /workspace/MLEvolve/runs
 """
 
 import argparse
@@ -27,35 +12,12 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
-
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from engine.coldstart.knowledge import text_digest
+
 LOG_DIGEST = re.compile(r"Knowledge injected at draft: (\d+) chars, digest ([0-9a-f]+)")
-
-
-class _TagIgnoringLoader(yaml.SafeLoader):
-    """config.yaml embeds `!!python/object/apply:pathlib.PosixPath`, which SafeLoader rejects and
-    unsafe_load would execute."""
-
-
-def _reconstruct(loader, suffix, node):
-    """Rebuild pathlib paths; map every other unknown tag to None.
-
-    Mapping *everything* to None is the obvious implementation and it silently destroyed the
-    field this script depends on: `desc_file` is stored as a tagged sequence of path components,
-    so it became None, `Path(str(None or ""))` became `Path('.')`, and `.exists()` is true for
-    '.', so every run failed with `IsADirectoryError: Is a directory: '.'`. Reconstructing the
-    path is both correct and cheaper than the failure it prevents.
-    """
-    if "pathlib" in suffix and isinstance(node, yaml.SequenceNode):
-        parts = [str(p) for p in loader.construct_sequence(node)]
-        return str(Path(*parts)) if parts else None
-    return None
-
-
-_TagIgnoringLoader.add_multi_constructor("", _reconstruct)
 
 
 def logged_digest(run: Path) -> tuple[int, str] | None:
@@ -70,17 +32,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", default="/workspace/MLEvolve/runs")
-    ap.add_argument("--write", action="store_true", help="write the file when the digest matches")
+    ap.add_argument("--write", action="store_true",
+                    help="retired option; historical retrieval replay is no longer supported")
     ap.add_argument("--only", default=None, help="substring filter on run names")
     args = ap.parse_args()
 
-    from omegaconf import OmegaConf
-
-    from engine.coldstart.knowledge import build_guidance_description, text_digest
-
+    if args.write:
+        print("--write is retired: this command only verifies saved files; nothing will be written.")
     root = Path(args.runs)
     ok = mismatch = skipped = 0
-    print(f"{'run':<44}{'logged':>16}{'replayed':>16}  result")
+    print(f"{'run':<44}{'logged':>16}{'saved':>16}  result")
     print("-" * 100)
 
     for run in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -88,71 +49,25 @@ def main() -> int:
             continue
         want = logged_digest(run)
         if not want:
-            continue                       # not a KB arm, or never logged an injection
+            continue
         want_chars, want_digest = want
         target = run / "logs" / "injected_knowledge.md"
-
-        # Verify anything already on disk instead of trusting it. A file can be present and
-        # WRONG: build_guidance_description writes this file as a side effect, so an earlier
-        # report-only pass of this script deposited today's retrieval into every replayed run,
-        # including the one whose digest does not match. Re-check, and delete what fails.
-        if target.exists():
-            have = text_digest(target.read_text(errors="replace"))
-            if have == want_digest:
-                ok += 1
-                print(f"{run.name:<44}{want_digest:>16}{have:>16}  already present, verified")
-                continue
-            target.unlink()
-            print(f"{run.name:<44}{want_digest:>16}{have:>16}  "
-                  f"REMOVED: on-disk file is not what this run received")
-
-        cfg_path = run / "logs" / "config.yaml"
-        try:
-            raw = yaml.load(cfg_path.read_text(errors="replace"), Loader=_TagIgnoringLoader) or {}
-            cfg = OmegaConf.create(raw)
-            desc_str = str(cfg.get("desc_file") or "").strip()
-            # is_file(), not exists(): Path("") is Path('.'), and '.' exists.
-            desc = Path(desc_str) if desc_str else None
-            if desc is None or not desc.is_file():
-                print(f"{run.name:<44}{want_digest:>16}{'-':>16}  "
-                      f"SKIP: description not readable ({desc_str or 'desc_file unset'})")
-                skipped += 1
-                continue
-            task_desc = desc.read_text(errors="replace")
-            # Cache-only: never pay for extraction or a new distillation during a replay.
-            cfg.max_extractions_per_coldstart = 0
-            cfg.coldstart.methodology_text = ""
-            build_guidance_description(cfg, task_desc=task_desc)
-            got = str(cfg.coldstart.methodology_text or "")
-        except Exception as e:
-            print(f"{run.name:<44}{want_digest:>16}{'-':>16}  SKIP: {type(e).__name__}: {e}")
+        if not target.is_file():
             skipped += 1
+            print(f"{run.name:<44}{want_digest:>16}{'-':>16}  "
+                  "SKIP: historical replay is no longer supported; no saved injection")
             continue
-
-        # build_guidance_description has ALREADY written target as a side effect. Keeping it is
-        # the exception, not the default: only a verified match, and only when asked.
-        got_digest = text_digest(got)
-        verified = got_digest == want_digest and len(got) == want_chars
-        keep = verified and args.write
-        if target.exists() and not keep:
-            target.unlink()
-
-        if verified:
+        saved = target.read_text(errors="replace")
+        have = text_digest(saved)
+        if have == want_digest and len(saved) == want_chars:
             ok += 1
-            print(f"{run.name:<44}{want_digest:>16}{got_digest:>16}  "
-                  f"{'MATCH -> written' if keep else 'MATCH (not written; pass --write)'}")
+            print(f"{run.name:<44}{want_digest:>16}{have:>16}  verified")
         else:
             mismatch += 1
-            print(f"{run.name:<44}{want_digest:>16}{got_digest:>16}  "
-                  f"MISMATCH ({want_chars} vs {len(got)} chars) — KB moved, not recoverable")
+            print(f"{run.name:<44}{want_digest:>16}{have:>16}  "
+                  "MISMATCH: saved content is not the logged injection; file left unchanged")
 
-    print(f"\n{ok} recovered, {mismatch} unrecoverable, {skipped} skipped")
-    if mismatch:
-        print("Mismatched runs were NOT written, and any stale file left by an earlier pass was\n"
-              "deleted. Report them as unmeasurable: substituting today's retrieval would score\n"
-              "nodes against techniques the run never received.")
-    if not args.write and ok:
-        print("Re-run with --write to save the recovered files.")
+    print(f"\n{ok} verified, {mismatch} mismatched, {skipped} unavailable")
     return 0
 
 

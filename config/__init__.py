@@ -125,6 +125,14 @@ class InitSolutionConfig:
 
 
 @dataclass
+class CorpusRetrieverConfig:
+    jev_model: str = "jev-1.13.0"
+    jev_threshold: float = 0.5
+    chunk_tokens: int = 10000
+    chunk_overlap: int = 200
+
+
+@dataclass
 class Config(Hashable):
     data_dir: Path
     dataset_dir: Path
@@ -154,9 +162,9 @@ class Config(Hashable):
     coldstart: ColdstartConfig
 
     methodology_kb_path: str = ""
-    methodology_retrieval: str = "vector"
+    methodology_retrieval: str = "none"
     abstract_index_path: str = ""
-    lazy_pool: int = 40
+    lazy_pool: int = 100
     lazy_min_score: float = 0.05
     max_extractions_per_coldstart: int = 20
     lazy_extract_workers: int = 4
@@ -184,6 +192,7 @@ class Config(Hashable):
 
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)
+    corpus_retriever: CorpusRetrieverConfig = field(default_factory=CorpusRetrieverConfig)
 
 
 def _get_next_logindex(dir: Path) -> int:

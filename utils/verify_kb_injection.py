@@ -2,8 +2,8 @@
 
 Checks the three properties the coldstart split is supposed to guarantee:
 
-  1. build_guidance_description returns pretrained-model guidance ONLY, and puts the
-     literature techniques on cfg.coldstart.methodology_text instead of concatenating them.
+  1. build_guidance_description returns pretrained-model guidance ONLY and clears
+     methodology_text without automatic literature retrieval or cache loading.
   2. draft_agent renders those techniques under their own heading — NOT inside the
      "Pretrained Model Strategy / Option A [RECOMMENDED]" block, whose "copy the Code
      template EXACTLY" instruction does not apply to prose techniques.
@@ -109,7 +109,7 @@ def main() -> int:
                 trim_methodology_text(meth, 100000) == meth)
     ok &= check("empty input -> empty output", trim_methodology_text("", 2000) == "")
 
-    print("\n1b. build_guidance_description splits the two kinds of guidance")
+    print("\n1b. coldstart no longer retrieves or loads literature")
     import engine.coldstart.knowledge as kn
 
     repo = Path(__file__).resolve().parent.parent
@@ -126,50 +126,31 @@ def main() -> int:
     ok &= check("baseline arm: return value carries no technique text",
                 "Methodology Insights from Literature" not in returned)
 
-    # KB arm: stub the retriever so no index/API is needed.
+    from unittest.mock import patch
+
     cfg2 = SimpleNamespace(
-        exp_id="spooky-author-identification", coldstart=SimpleNamespace(
+        exp_id=cfg.exp_id, coldstart=SimpleNamespace(
             task_json_path=cfg.coldstart.task_json_path,
             model_json_path=cfg.coldstart.model_json_path,
-            description="", methodology_text=""),
+            description="", methodology_text=MARKER),
         methodology_kb_path="/tmp/fake_kb", methodology_retrieval="lazy", torch_hub_dir="")
-    import engine.coldstart.methodology_agent as ma
-    _orig = ma.build_methodology_guidance
-    ma.build_methodology_guidance = lambda *a, **k: meth
-    try:
-        returned2 = kn.build_guidance_description(cfg2, task_desc="classify text")
-    finally:
-        ma.build_methodology_guidance = _orig
-    ok &= check("KB arm: techniques land on cfg.coldstart.methodology_text",
-                MARKER in cfg2.coldstart.methodology_text)
-    ok &= check("KB arm: techniques NOT concatenated onto the return value",
-                MARKER not in returned2, "this was the mislabelling bug")
+    with patch("engine.coldstart.methodology_agent.build_methodology_guidance") as retrieve, \
+            patch.object(kn, "_build_methodology_text") as static:
+        for mode in ("lazy", "vector", "llm", "static"):
+            cfg2.methodology_retrieval = mode
+            cfg2.coldstart.methodology_text = MARKER
+            returned2 = kn.build_guidance_description(cfg2, task_desc="classify text")
+            ok &= check(f"legacy {mode}: model recommendations unchanged", returned2 == returned)
+            ok &= check(f"legacy {mode}: techniques cleared", cfg2.coldstart.methodology_text == "")
+        ok &= check("no dynamic or static retrieval invoked",
+                    not retrieve.called and not static.called)
 
     print("\n1c. the \"None model\" sentinel still works")
-    # draft_agent gates the whole Pretrained Model Strategy block on
-    #   agent.coldstart_description != "None model"
-    # _build_guidance_text returns exactly "None model" when the competition has no entry in
-    # competition_tag_classified.json. Under the old code the methodology text was appended to
-    # that string, so the comparison failed and the block fired anyway — with Option A reading
-    # literally "None model" followed by the paper techniques. Worse, it fired only in the KB
-    # arm (the control's methodology text is empty), so the two arms differed by a whole extra
-    # block of pretrained-model instructions, not just by the knowledge. A real confound.
-    cfg3 = SimpleNamespace(
-        exp_id="a-competition-that-is-not-in-the-tag-json",
-        coldstart=SimpleNamespace(task_json_path=cfg.coldstart.task_json_path,
-                                  model_json_path=cfg.coldstart.model_json_path,
-                                  description="", methodology_text=""),
-        methodology_kb_path="/tmp/fake_kb", methodology_retrieval="lazy", torch_hub_dir="")
-    ma.build_methodology_guidance = lambda *a, **k: meth
-    try:
-        desc3 = kn.build_guidance_description(cfg3, task_desc="classify text")
-    finally:
-        ma.build_methodology_guidance = _orig
+    cfg2.exp_id = "a-competition-that-is-not-in-the-tag-json"
+    desc3 = kn.build_guidance_description(cfg2, task_desc="classify text")
     ok &= check('description is exactly "None model"', desc3 == "None model", repr(desc3))
-    ok &= check("pretrained block would be SKIPPED (sentinel matches)",
-                desc3 == "None model")
-    ok &= check("but the techniques are still available separately",
-                MARKER in cfg3.coldstart.methodology_text)
+    ok &= check("no literature is injected for tasks without model recommendations",
+                cfg2.coldstart.methodology_text == "")
 
     print("\n1c-bis. the baseline arm is byte-identical to the pre-fix code")
     # Why this matters for the experiments, not just for correctness:

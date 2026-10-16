@@ -11,6 +11,10 @@
 
 An agentic MLE (Machine Learning Engineering) system that automatically solves Kaggle-style ML competitions through Monte Carlo Graph Search (MCGS) with multi-agent collaboration. This is an advanced version based on [AutoMLGen](https://arxiv.org/abs/2510.08511). MLEvolve achieves **#1 on the [MLE-bench](https://github.com/openai/mle-bench) leaderboard** (65.3% medal rate, 12-hour budget) and obtains competitive results on mathematical optimization tasks.
 
+For this fork's manual, task-specific paper retrieval, see
+[corpus_retriever/README.md](corpus_retriever/README.md). Cold start retains model
+recommendations but no longer automatically retrieves or extracts paper techniques.
+
 ## Timeline
 
 - **2026-06-05** — Paper released on arXiv: [MLEvolve: A Self-Evolving Framework for Automated Machine Learning Algorithm Discovery](https://arxiv.org/abs/2606.06473).
