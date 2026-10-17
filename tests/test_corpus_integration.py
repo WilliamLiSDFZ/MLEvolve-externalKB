@@ -2,10 +2,12 @@
 
 import importlib.util
 import json
+import multiprocessing
 import os
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -162,8 +164,9 @@ class PaperPDFIntegrationTests(unittest.TestCase):
                 document.new_page().insert_text((72, 72), "Appendix experiment: use grouped validation.")
                 document.save(pdf)
             with patch("engine.coldstart.ondemand._resolve_pdf", return_value="offline://fixture"), \
-                    patch("engine.coldstart.ondemand._download", side_effect=lambda url, path: shutil.copyfile(pdf, path)):
-                text = load_full_text(SimpleNamespace())
+                    patch("engine.coldstart.ondemand._download", side_effect=lambda url, path: shutil.copyfile(pdf, path)), \
+                    ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+                text = load_full_text(SimpleNamespace(), pool)
             self.assertIn("Main paper methodology.", text)
             self.assertIn("Appendix experiment: use grouped validation.", text)
 

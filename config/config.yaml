@@ -35,6 +35,12 @@ corpus_retriever:
   chunk_tokens: 10000         # index model's local tokenizer, not Jev's private tokenizer
   chunk_overlap: 200
 
+# Prepared corpus only: rerank once per run and inject the top 25 into every draft.
+draft_techniques:
+  enabled: False
+  cache_dir: cache/techinique
+  context_window: 258400      # conservative budget: Codex default 272000 * 95%; includes output
+
 # Legacy extraction/filter settings below do not govern manual corpus retrieval.
 max_extractions_per_coldstart: 20   # cost ceiling: papers deep-extracted per cold-start
 lazy_extract_workers: 4       # concurrent PDF+LLM extractions

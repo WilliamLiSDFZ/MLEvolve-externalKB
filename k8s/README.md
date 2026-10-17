@@ -50,6 +50,12 @@ git-ignored.
 and extracts task-specific techniques. It does not start training or inject the
 results, and does not call the legacy `prepare-task.sh`.
 
+After retrieval, three threads handle whole papers concurrently, including
+download and chunking. PDF parsing uses three reusable isolated processes;
+the embedding model is not copied into them. Logs show worker/paper IDs and
+individual stage times. The Job still requests 4 CPU and 16Gi; concurrent
+preparation increases peak memory and does not speed up startup imports.
+
 Before submitting:
 
 - Update `/workspace/MLEvolve` on the PVC to include `corpus_retriever` and this
@@ -95,6 +101,31 @@ To rerun after the previous Job has stopped, delete it and submit again:
 kubectl -n <NS> delete job mlevolve-prepare-jubias --ignore-not-found --wait=true
 kubectl -n <NS> apply -f k8s/job-prepare-jigsaw-unintended.yaml
 ```
+
+## Draft Top-25 paired experiments
+
+`job-jigsaw-unintended-draft-rerank-s42.yaml`, `-s43.yaml`, and `-s44.yaml`
+each contain two Jobs: baseline and LLM-ranked Top-25 injection into every draft.
+Across each pair, only `draft_techniques.enabled` and isolation identifiers differ.
+Both retain pretrained-model guidance, use GPT-5.6 Terra, and request 8 CPU,
+48 GiB RAM, one GPU, and a 12-hour run budget. Running all pairs requires six GPUs.
+The manifests do not pin a GPU model; check the actual allocated hardware when
+comparing results. Seeds pair training randomness but do not make LLM output deterministic.
+
+Before submission, update the PVC checkout with the new code and confirm the
+prepared corpus exists under `/workspace/MLEvolve/cache/techinique/` for the task.
+These Jobs never run retrieval. Each run saves its ranking and chosen records
+under `runs/<timestamp>_<EXP_NAME>/logs/draft_technique*`; the shared corpus stays intact.
+
+```bash
+kubectl -n <NS> apply -f k8s/job-jigsaw-unintended-draft-rerank-s42.yaml
+kubectl -n <NS> apply -f k8s/job-jigsaw-unintended-draft-rerank-s43.yaml
+kubectl -n <NS> apply -f k8s/job-jigsaw-unintended-draft-rerank-s44.yaml
+```
+
+The training wrapper propagates a wall-clock deadline to ranking and draft
+prompts. Startup errors preserve their exit code and stop before fusion; a
+normal time-budget timeout still proceeds to fuse completed candidates.
 
 ## Launch a run
 

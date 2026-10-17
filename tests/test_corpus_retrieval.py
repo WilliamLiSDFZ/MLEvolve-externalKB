@@ -3,8 +3,9 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from threading import Event, Lock, get_ident
+from threading import Barrier, Event, Lock, get_ident
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -72,7 +73,9 @@ class CorpusPipelineTests(unittest.TestCase):
         self.search = patch.object(rt, "search_papers", return_value=(
             [(paper(1), 1.0)], Tokenizer(), "search query")).start()
         self.load = patch.object(rt, "load_full_text",
-                                 side_effect=lambda paper: f"A useful technique for {paper.id}.").start()
+                                 side_effect=lambda paper, parser_pool: f"A useful technique for {paper.id}.").start()
+        self.parser_factory = patch.object(rt, "ProcessPoolExecutor").start()
+        self.parser_pool = self.parser_factory.return_value.__enter__.return_value
         self.jev = patch.object(rt, "JevReranker").start().return_value
         self.jev.filter.side_effect = screen
         self.agent = patch.object(rt, "CorpusTechniqueAgent").start().return_value
@@ -121,35 +124,51 @@ class CorpusPipelineTests(unittest.TestCase):
         self.assertEqual(len(result["papers"]), 1)
         self.assertEqual(self.load.call_count, 1)
 
-    def test_duplicate_fulltext_with_different_ids_skips_screening_and_extraction(self):
-        self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
+    def test_simultaneous_duplicate_fulltexts_only_screen_and_extract_once(self):
+        self.search.return_value = ([(paper(i), 1.0) for i in range(1, 4)], Tokenizer(), "query")
         self.load.side_effect = None
         self.load.return_value = "The same paper under different corpus identifiers."
-        result = self.run_pipeline()
-        self.assertEqual(self.load.call_count, 2)
+        prepared = Barrier(3)
+        split = rt.split_paper
+
+        def prepare_together(*args, **kwargs):
+            chunks = split(*args, **kwargs)
+            prepared.wait(timeout=5)
+            return chunks
+
+        with patch.object(rt, "split_paper", side_effect=prepare_together):
+            result = self.run_pipeline()
+        self.assertEqual(self.load.call_count, 3)
         self.jev.filter.assert_called_once()
         self.agent.extract.assert_called_once()
-        self.assertEqual(result["counts"], {"complete": 1, "duplicate": 1})
-        duplicate = result["papers"][1]
-        self.assertEqual(duplicate["duplicate_of"], rt.paper_key(paper(1)))
-        self.assertEqual(duplicate["fulltext_sha256"], result["papers"][0]["fulltext_sha256"])
-        saved = self.output / "task-a" / "papers" / rt.paper_key(paper(2))
-        self.assertEqual(json.loads((saved / "paper.json").read_text()), duplicate)
-        self.assertFalse((saved / "fulltext.md").exists())
-        self.assertFalse((saved / "screening.json").exists())
-        self.assertFalse((saved / "techniques.json").exists())
+        self.assertEqual(result["counts"], {"complete": 1, "duplicate": 2})
+        representative = next(record for record in result["papers"] if record["status"] == "complete")
+        for duplicate in (record for record in result["papers"] if record["status"] == "duplicate"):
+            self.assertEqual(duplicate["duplicate_of"], representative["paper_key"])
+            self.assertEqual(duplicate["fulltext_sha256"], representative["fulltext_sha256"])
+            saved = self.output / "task-a" / "papers" / duplicate["paper_key"]
+            self.assertEqual(json.loads((saved / "paper.json").read_text()), duplicate)
+            self.assertFalse((saved / "fulltext.md").exists())
+            self.assertFalse((saved / "screening.json").exists())
+            self.assertFalse((saved / "techniques.json").exists())
 
     def test_failed_chunk_preparation_does_not_mark_fulltext_as_processed(self):
         self.search.return_value = ([(paper(1), 1.0), (paper(2), 0.8)], Tokenizer(), "query")
-        self.load.side_effect = None
-        self.load.return_value = "The same full text."
+        failed = Event()
         split = rt.split_paper
+
+        def load(source, parser_pool):
+            if source.id == "p2":
+                self.assertTrue(failed.wait(5))
+            return "The same full text."
 
         def fail_first(text, paper_id, *args, **kwargs):
             if paper_id == "p1":
+                failed.set()
                 raise ValueError("bad chunk preparation")
             return split(text, paper_id, *args, **kwargs)
 
+        self.load.side_effect = load
         with patch.object(rt, "split_paper", side_effect=fail_first):
             result = self.run_pipeline()
         self.assertEqual(result["counts"], {"error": 1, "complete": 1})
@@ -216,35 +235,43 @@ class CorpusPipelineTests(unittest.TestCase):
                 self.assertEqual((target / "manifest.json").read_bytes(), previous)
                 self.assertEqual([p.name for p in self.output.iterdir() if p.is_dir()], ["task-a"])
 
-    def test_three_independent_workers_keep_preparation_and_results_in_order(self):
+    def test_three_workers_prepare_concurrently_with_private_reused_tokenizers(self):
         entered = {f"p{i}": Event() for i in range(1, 5)}
+        extracting = {key: Event() for key in entered}
         release = {key: Event() for key in entered}
         finished = {key: Event() for key in entered}
         lock = Lock()
         active, peak = 0, 0
-        completed, preparation_threads, worker_threads = [], [], set()
+        completed, preparation_threads, tokenizers = [], {}, {}
         caller_threads, jev_clients, agents = [], [], []
 
         class RecordingTokenizer(Tokenizer):
             def __call__(self, text, **kwargs):
-                preparation_threads.append(get_ident())
+                with lock:
+                    tokenizers.setdefault(get_ident(), set()).add(id(self))
                 return super().__call__(text, **kwargs)
 
+        original_tokenizer = RecordingTokenizer()
         self.search.return_value = (
-            [(paper(i), 1.0) for i in range(1, 5)], RecordingTokenizer(), "query")
+            [(paper(i), 1.0) for i in range(1, 5)], original_tokenizer, "query")
 
-        def load(_paper):
-            preparation_threads.append(get_ident())
-            return f"A useful technique for {_paper.id}."
-
-        def extract_in_worker(chunks, selected, task, data):
+        def load(source, parser_pool):
             nonlocal active, peak
-            identity = chunks[0].paper_id
+            self.assertIs(parser_pool, self.parser_pool)
             with lock:
                 active += 1
                 peak = max(peak, active)
-                worker_threads.add(get_ident())
-            entered[identity].set()
+                preparation_threads[source.id] = get_ident()
+            entered[source.id].set()
+            if source.id == "p1":
+                self.assertTrue(release["p1"].wait(5))
+            return f"A useful technique for {source.id}."
+
+        def extract_in_worker(chunks, selected, task, data):
+            nonlocal active
+            identity = chunks[0].paper_id
+            self.assertEqual(get_ident(), preparation_threads[identity])
+            extracting[identity].set()
             try:
                 self.assertTrue(release[identity].wait(5), identity)
                 result = extract(chunks, selected, task, data)
@@ -257,14 +284,26 @@ class CorpusPipelineTests(unittest.TestCase):
                 finished[identity].set()
 
         def new_jev(*args, **kwargs):
+            owner = get_ident()
             client = Mock()
-            client.filter.side_effect = screen
+
+            def filter_in_worker(*args):
+                self.assertEqual(get_ident(), owner)
+                return screen(*args)
+
+            client.filter.side_effect = filter_in_worker
             jev_clients.append(client)
             return client
 
         def new_agent(*args, **kwargs):
+            owner = get_ident()
             agent = Mock()
-            agent.extract.side_effect = extract_in_worker
+
+            def extract_with_owner(*args):
+                self.assertEqual(get_ident(), owner)
+                return extract_in_worker(*args)
+
+            agent.extract.side_effect = extract_with_owner
             agents.append(agent)
             return agent
 
@@ -280,6 +319,9 @@ class CorpusPipelineTests(unittest.TestCase):
             try:
                 for identity in ("p1", "p2", "p3"):
                     self.assertTrue(entered[identity].wait(5), identity)
+                for identity in ("p2", "p3"):
+                    self.assertTrue(extracting[identity].wait(5), identity)
+                self.assertFalse(extracting["p1"].is_set())
                 self.assertFalse(entered["p4"].is_set())
                 self.assertEqual(peak, 3)
                 for identity in ("p3", "p4", "p2", "p1"):
@@ -293,21 +335,24 @@ class CorpusPipelineTests(unittest.TestCase):
 
         self.assertEqual(completed, ["p3", "p4", "p2", "p1"])
         self.assertEqual(peak, 3)
+        worker_threads = set(preparation_threads.values())
         self.assertEqual(len(worker_threads), 3)
-        self.assertEqual(set(preparation_threads), set(caller_threads))
         self.assertTrue(worker_threads.isdisjoint(caller_threads))
-        self.assertEqual(len(jev_clients), 4)
-        self.assertEqual(len(agents), 4)
-        for client in jev_clients:
-            client.filter.assert_called_once()
-        for agent in agents:
-            agent.extract.assert_called_once()
-        self.assertEqual({agent.extract.call_args.args[0][0].paper_id for agent in agents},
-                         {"p1", "p2", "p3", "p4"})
+        self.assertEqual(set(tokenizers), worker_threads)
+        self.assertTrue(all(len(copies) == 1 for copies in tokenizers.values()))
+        copy_ids = set().union(*tokenizers.values())
+        self.assertEqual(len(copy_ids), 3)
+        self.assertNotIn(id(original_tokenizer), copy_ids)
+        self.assertEqual(preparation_threads["p3"], preparation_threads["p4"])
+        self.assertEqual(sum(client.filter.call_count for client in jev_clients), 4)
+        self.assertEqual(sum(agent.extract.call_count for agent in agents), 4)
         self.assertEqual([record["paper_id"] for record in result["papers"]],
                          ["p1", "p2", "p3", "p4"])
         saved = json.loads((self.output / "task-a" / "techniques.json").read_text())
         self.assertEqual([item["paper_id"] for item in saved], ["p1", "p2", "p3", "p4"])
+        options = self.parser_factory.call_args.kwargs
+        self.assertEqual(options["max_workers"], 3)
+        self.assertEqual(options["mp_context"].get_start_method(), "spawn")
 
     def test_one_worker_failure_does_not_discard_other_papers(self):
         self.search.return_value = ([(paper(i), 1.0) for i in range(1, 5)], Tokenizer(), "query")
@@ -454,14 +499,37 @@ class CorpusPipelineTests(unittest.TestCase):
             self.run_pipeline()
         self.search.assert_not_called()
 
-    def test_fulltext_reader_does_not_truncate_at_old_character_limit(self):
+    def test_broken_parser_pool_preserves_previous_task_result(self):
+        self.run_pipeline()
+        path = self.output / "task-a" / "manifest.json"
+        previous = path.read_bytes()
+        self.load.side_effect = BrokenProcessPool("PDF parser process exited")
+        with self.assertRaises(BrokenProcessPool):
+            self.run_pipeline()
+        self.assertEqual(path.read_bytes(), previous)
+        self.assertEqual([p.name for p in self.output.iterdir() if p.is_dir()], ["task-a"])
+
+    def test_fulltext_reader_waits_for_parser_before_removing_pdf(self):
         from engine.coldstart import ondemand
-        fake_pdf = SimpleNamespace(to_markdown=Mock(return_value="a" * 65000 + "END"))
-        with patch.dict("sys.modules", {"pymupdf4llm": fake_pdf}), \
-             patch.object(ondemand, "_download", return_value=True):
-            source = paper(1)
-            source.pdf_url = "https://example.org/paper.pdf"
-            self.assertTrue(self.real_loader(source).endswith("END"))
+        source = paper(1)
+        source.pdf_url = "https://example.org/paper.pdf"
+        paths = []
+
+        def parse_result():
+            path = Path(self.parser_pool.submit.call_args.args[1])
+            self.assertTrue(path.exists())
+            paths.append(path)
+            return "a" * 65000 + "END"
+
+        def download(url, path):
+            path.write_bytes(b"PDF fixture")
+            return True
+
+        self.parser_pool.submit.return_value.result.side_effect = parse_result
+        with patch.object(ondemand, "_download", side_effect=download):
+            self.assertTrue(self.real_loader(source, self.parser_pool).endswith("END"))
+        self.assertIs(self.parser_pool.submit.call_args.args[0], rt._parse_pdf)
+        self.assertFalse(paths[0].exists())
 
     real_loader = staticmethod(rt.load_full_text)
 

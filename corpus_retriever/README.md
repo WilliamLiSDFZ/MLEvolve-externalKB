@@ -1,8 +1,8 @@
 # Manual task-specific corpus preparation
 
-Run this command in the dev pod before an experiment. MLEvolve cold start now
-only supplies pretrained-model recommendations: it does not retrieve papers,
-extract techniques, or automatically inject these prepared results.
+Run this command in the dev pod before an experiment. MLEvolve cold start
+supplies pretrained-model recommendations; paper retrieval and extraction run
+separately. Enable `draft_techniques.enabled` to rank and inject prepared results.
 
 ## Run
 
@@ -50,9 +50,11 @@ No TypeSafe SDK is required.
    supplied public-data directory. Omitted data and resources remain unknown.
 2. Reuse centered hybrid abstract search with `lazy_pool=100` and the existing
    `lazy_min_score` relative cutoff. Fewer than 100 candidates may remain.
-3. Download each candidate and parse the full PDF without the old 64,000-character
-   cutoff. Skip repeated paper IDs, then skip identical parsed-text SHA-256 hashes
-   before chunking/model calls, recording `duplicate_of` for repeated content.
+3. Skip repeated paper IDs, then dispatch candidates to three workers for
+   download, full PDF parsing without the old 64,000-character cutoff, and
+   chunking. After successful preparation, check and register parsed-text
+   SHA-256 hashes under a lock, recording `duplicate_of` for repeated content.
+   Identical papers may repeat preparation but not Jev or extraction calls.
    Ask Jev about **every chunk** of the remaining papers, including chunks after
    the first positive. Different PDF versions or extraction text can have
    different hashes and are not fuzzy-matched.
@@ -69,14 +71,18 @@ No TypeSafe SDK is required.
    The original cross-task methodology cache is neither reused for extraction
    nor overwritten.
 
-PDF download/parsing and tokenization run on the main thread. A single pool of
-three workers screens and extracts up to three papers at once; each paper keeps
-its own agent state and reads chunks sequentially. Preparation and model calls
-overlap without queuing the entire corpus in memory. Results are aggregated in
-retrieval order, regardless of completion order. Logs identify the paper/chunk,
-stage, reading action, and completed-paper count. Ordinary paper failures remain
-isolated; fatal errors stop submission and wait for running workers before
-cleaning up the temporary output, preserving the previous task result.
+Three threads each handle a paper from download through extraction, taking the
+next candidate as soon as they finish. PDF parsing uses a shared pool of three
+reusable `spawn` processes because PyMuPDF is not thread-safe. Each thread has
+its own tokenizer copy; parsing processes do not load the embedding model.
+Each paper keeps its own agent state and reads chunks sequentially. At most
+three papers are active, without queuing the entire corpus in memory.
+The first successfully prepared copy of identical text becomes its representative,
+so that choice may vary between runs. Results are still aggregated in retrieval
+order. Logs identify the worker, paper/chunk, stage, elapsed time, reading action,
+and completed-paper count. Ordinary paper failures remain isolated; fatal errors,
+including a broken parser process pool, stop submission and wait for running
+workers before cleaning up temporary output, preserving the previous task result.
 
 Jev defaults to pinned `jev-1.13.0` with a Noul threshold of `0.5`. Override with
 `corpus_retriever.jev_model=...` or `corpus_retriever.jev_threshold=...`.
@@ -147,8 +153,9 @@ Aggregate techniques have IDs `<paper_key>:<zero-based technique index>`.
 `manifest.json` records both `raw_technique_count` and final `technique_count`,
 plus deduplication status. Per-paper `techniques.json` files retain all original
 extractions, including entries represented by another technique in the aggregate.
-Exact duplicate papers retain a `paper.json` pointing to the first paper's key;
-they do not repeat its full text, screening, or extraction files.
+Exact duplicate papers retain a `paper.json` pointing to the first successfully
+prepared copy's key; they do not repeat its full text, screening, or extraction
+files.
 
 Repeating the command performs retrieval/screening/extraction again and replaces
 the same task directory, removing stale papers. Processing uses a temporary
@@ -166,9 +173,36 @@ Exit codes: **0** = complete (possibly no useful techniques), **2** = partial
 result saved, **1** = fatal failure. Normal all-negative screening stays empty;
 there is no minimum-paper top-up or fallback to unfiltered papers.
 
-No injection policy is selected here. Adaptations are experiment proposals,
-not measured task improvements. Missing PDF text, including image-only
+Adaptations are experiment proposals, not measured task improvements. Missing PDF text, including image-only
 equations/figures or separately hosted supplements, is not recovered by this reader.
+
+## Use the corpus in draft generation
+
+Enable `draft_techniques.enabled=True` when starting MLEvolve. It reads
+`cache/techinique/<exp_id>/techniques.json`, ranks all candidates once using
+`agent.code.model`, and supplies the top 25 (or all if fewer) to every draft,
+including the single-shot path and all stepwise stages. Each draft chooses which
+compatible proposals to try. Improve and other stages do not directly receive
+this block. This switch is independent of pretrained-model coldstart guidance.
+
+Ranking uses the current task, data preview, GPU properties, CPU/RAM limits,
+concurrency, remaining run time, and per-execution timeout. It keeps original
+records and never overwrites the shared corpus. A published `partial` corpus is
+accepted with a warning. Missing/empty/mismatched corpora and invalid rankings
+stop startup rather than silently producing a baseline run.
+
+The run's `logs/` contains `draft_technique_rerank.json` (inputs, full ranking,
+reasons, source hash, model and context budget), `draft_techniques.json` (selected
+original records), and `draft_techniques.md` (the actual candidate block).
+
+The default `draft_techniques.context_window=258400` is a conservative budget for
+the current GPT-5.6 Terra proxy, based on the local Codex default 272,000 × 95%.
+The [official API model page](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+lists 1,050,000 context tokens and 128,000 maximum output tokens; the proxy's
+actual limit has not been load-tested. Reranking and draft requests use UTF-8
+bytes as a conservative text-token upper bound, with message overhead and
+output reserved. No candidates are silently truncated. Change the configured
+budget if switching to a model/provider with a smaller verified limit.
 
 ## Offline checks
 

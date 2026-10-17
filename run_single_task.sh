@@ -94,6 +94,7 @@ DESC_FILE="${DESC_FILE:-${DATA_DIR}/description.md}"
 # EXTRA_RUN_ARGS: optional extra OmegaConf dotlist overrides (e.g. API keys injected
 # from a k8s Secret by k8s/entrypoint.sh: "agent.code.api_key=... agent.code.model=...").
 # Intentionally unquoted so it expands into separate words.
+export MLEVOLVE_RUN_DEADLINE=$(( $(date +%s) + TIME_LIMIT_SECS ))
 CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-after=10s "${TIME_LIMIT_SECS}s" python run.py \
   exp_id="${EXP_ID}" \
   dataset_dir="${dataset_dir}" \
@@ -102,6 +103,7 @@ CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-aft
   exp_name="${EXP_NAME}" \
   start_cpu_id="${start_cpu}" \
   cpu_number="${CPUS_PER_TASK}" \
+  agent.time_limit="${TIME_LIMIT_SECS}" \
   ${EXTRA_RUN_ARGS:-}
 
 RUN_EXIT=$?
@@ -113,6 +115,7 @@ elif [ $RUN_EXIT -eq 130 ]; then
   exit 130
 elif [ $RUN_EXIT -ne 0 ]; then
   echo "Run failed with exit code: $RUN_EXIT"
+  exit "$RUN_EXIT"
 fi
 
 # ── Post-processing: ensemble top solutions ──

@@ -9,11 +9,17 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
+from multiprocessing import get_context
 from pathlib import Path
+from threading import Lock, current_thread, local
 
 from .jev_reranker import JEV_CRITERIA, JEV_PROMPT, JevReranker, split_paper
 from .technique_agent import SYSTEM_PROMPT, CorpusTechniqueAgent
@@ -80,20 +86,44 @@ def search_papers(task_description, cfg):
     return candidates, tokenizer, query
 
 
-def load_full_text(paper):
+@contextmanager
+def _stage(key, stage):
+    worker = current_thread().name
+    started = time.monotonic()
+    logger.info("[Corpus] paper=%s worker=%s stage=%s starting", key, worker, stage)
+    try:
+        yield
+    except BaseException:
+        logger.warning("[Corpus] paper=%s worker=%s stage=%s failed after %.1fs",
+                       key, worker, stage, time.monotonic() - started)
+        raise
+    else:
+        logger.info("[Corpus] paper=%s worker=%s stage=%s done in %.1fs",
+                    key, worker, stage, time.monotonic() - started)
+
+
+def _parse_pdf(path):
+    # PyMuPDF runs only inside spawned processes, never the paper threads.
     import pymupdf4llm
+    return pymupdf4llm.to_markdown(path)
+
+
+def load_full_text(paper, parser_pool):
     from engine.coldstart.ondemand import _download, _resolve_pdf
 
-    url = _resolve_pdf(paper)
-    if not url:
-        raise ValueError("Paper has no resolvable PDF URL")
+    key = paper_key(paper)
     with tempfile.TemporaryDirectory(prefix="mlevolve-paper-") as directory:
         path = Path(directory) / "paper.pdf"
-        if not _download(url, path):
-            raise OSError("Could not download paper PDF")
-        text = pymupdf4llm.to_markdown(str(path))
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("Paper PDF yielded no readable text")
+        with _stage(key, "download"):
+            url = _resolve_pdf(paper)
+            if not url:
+                raise ValueError("Paper has no resolvable PDF URL")
+            if not _download(url, path):
+                raise OSError("Could not download paper PDF")
+        with _stage(key, "parse"):
+            text = parser_pool.submit(_parse_pdf, str(path)).result()
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Paper PDF yielded no readable text")
     return text
 
 
@@ -148,18 +178,22 @@ def _screen_and_extract(record, chunks, paper_dir, task_description, data_descri
     key = record["paper_key"]
     try:
         logger.info("[Corpus] paper %s: screening %d chunks", key, len(chunks))
-        selected, decisions = jev.filter(chunks, task_description, data_description)
-        _write_json(paper_dir / "screening.json", {
-            "chunks": [asdict(chunk) for chunk in chunks], "decisions": decisions,
-            "selected_chunk_ids": [chunk.id for chunk in selected]})
+        with _stage(key, "jev"):
+            selected, decisions = jev.filter(chunks, task_description, data_description)
+        with _stage(key, "save_screening"):
+            _write_json(paper_dir / "screening.json", {
+                "chunks": [asdict(chunk) for chunk in chunks], "decisions": decisions,
+                "selected_chunk_ids": [chunk.id for chunk in selected]})
         record["chunk_count"] = len(chunks)
         record["selected_chunk_ids"] = [chunk.id for chunk in selected]
         record["screening_complete"] = all(d["status"] == "ok" for d in decisions)
         if selected:
             logger.info("[Corpus] paper %s: extracting from %d selected chunks", key, len(selected))
-            result = CorpusTechniqueAgent(cfg).extract(
-                chunks, selected, task_description, data_description)
-            _write_json(paper_dir / "techniques.json", result)
+            with _stage(key, "extract"):
+                result = CorpusTechniqueAgent(cfg).extract(
+                    chunks, selected, task_description, data_description)
+            with _stage(key, "save_techniques"):
+                _write_json(paper_dir / "techniques.json", result)
             record["status"] = result["status"]
             record["technique_count"] = len(result["techniques"])
             if result["status"] != "complete":
@@ -257,6 +291,50 @@ def run_retrieval(cfg, output_root=None):
                 unique.append((paper, score, key))
             results, pending = {}, {}
             fulltext_papers = {}
+            hash_lock = Lock()
+            worker_state = local()
+
+            def init_worker():
+                worker_state.tokenizer = deepcopy(tokenizer)
+
+            def process_paper(paper, score, key):
+                paper_dir = staging / "papers" / key
+                paper_dir.mkdir(parents=True)
+                record = {"paper_key": key, "paper_id": getattr(paper, "id", None),
+                          "paper_title": getattr(paper, "title", ""),
+                          "abstract": getattr(paper, "abstract", "") or "",
+                          "source": getattr(paper, "source", "") or getattr(paper, "pdf_url", ""),
+                          "retrieval_score": float(score), "status": "error"}
+                logger.info("[Corpus] preparing paper %s worker=%s: %s",
+                            key, current_thread().name, record["paper_title"])
+                try:
+                    text = load_full_text(paper, parser_pool)
+                    record["fulltext_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+                    with _stage(key, "chunk"):
+                        chunks = split_paper(text, record["paper_id"], record["paper_title"],
+                                             record["abstract"], worker_state.tokenizer,
+                                             max_tokens=settings.chunk_tokens, overlap=settings.chunk_overlap)
+                    with _stage(key, "save_fulltext"):
+                        (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
+                    # Claim only after preparation succeeds; never hold this lock during I/O.
+                    with hash_lock:
+                        duplicate_of = fulltext_papers.setdefault(record["fulltext_sha256"], key)
+                    if duplicate_of != key:
+                        (paper_dir / "fulltext.md").unlink()
+                        record.update(status="duplicate", duplicate_of=duplicate_of)
+                        _write_json(paper_dir / "paper.json", record)
+                        logger.info("[Corpus] paper %s: duplicate full text of %s; skipping",
+                                    key, duplicate_of)
+                        return record, []
+                except (PermissionError, ImportError, BrokenProcessPool):
+                    raise
+                except Exception as exc:
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+                    logger.warning("[Corpus] paper %s preparation failed: %s", key, record["error"])
+                    _write_json(paper_dir / "paper.json", record)
+                    return record, []
+                return _screen_and_extract(record, chunks, paper_dir, task_description,
+                                           data_description, cfg, api_key)
 
             def collect_ready(block=False):
                 if not pending:
@@ -272,47 +350,14 @@ def run_retrieval(cfg, output_root=None):
                                 record["status"], len(techniques))
 
             logger.info("[Corpus] processing %d unique papers with up to 3 workers", len(unique))
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="corpus") as executor:
+            # Shut down paper threads before their parser pool and temporary files.
+            with ProcessPoolExecutor(max_workers=3, mp_context=get_context("spawn")) as parser_pool, \
+                 ThreadPoolExecutor(max_workers=3, thread_name_prefix="corpus",
+                                    initializer=init_worker) as executor:
                 try:
                     for index, (paper, score, key) in enumerate(unique):
                         collect_ready(block=len(pending) == 3)
-                        paper_dir = staging / "papers" / key
-                        paper_dir.mkdir(parents=True)
-                        record = {"paper_key": key, "paper_id": getattr(paper, "id", None),
-                                  "paper_title": getattr(paper, "title", ""),
-                                  "abstract": getattr(paper, "abstract", "") or "",
-                                  "source": getattr(paper, "source", "") or getattr(paper, "pdf_url", ""),
-                                  "retrieval_score": float(score), "status": "error"}
-                        logger.info("[Corpus] preparing paper %d/%d (%s): %s",
-                                    index + 1, len(unique), key, record["paper_title"])
-                        try:
-                            # PyMuPDF is not thread-safe; prepare text and tokenizer slices here.
-                            text = load_full_text(paper)
-                            record["fulltext_sha256"] = hashlib.sha256(text.encode()).hexdigest()
-                            duplicate_of = fulltext_papers.get(record["fulltext_sha256"])
-                            if duplicate_of is not None:
-                                record.update(status="duplicate", duplicate_of=duplicate_of)
-                                _write_json(paper_dir / "paper.json", record)
-                                results[index] = (record, [])
-                                logger.info("[Corpus] paper %s: duplicate full text of %s; skipping",
-                                            key, duplicate_of)
-                                continue
-                            (paper_dir / "fulltext.md").write_text(text, encoding="utf-8")
-                            chunks = split_paper(text, record["paper_id"], record["paper_title"],
-                                                 record["abstract"], tokenizer,
-                                                 max_tokens=settings.chunk_tokens, overlap=settings.chunk_overlap)
-                            fulltext_papers[record["fulltext_sha256"]] = key
-                        except (PermissionError, ImportError):
-                            raise
-                        except Exception as exc:
-                            record["error"] = f"{type(exc).__name__}: {exc}"
-                            logger.warning("[Corpus] paper %s preparation failed: %s", key, record["error"])
-                            _write_json(paper_dir / "paper.json", record)
-                            results[index] = (record, [])
-                            continue
-                        collect_ready()
-                        pending[executor.submit(_screen_and_extract, record, chunks, paper_dir,
-                                                task_description, data_description, cfg, api_key)] = index
+                        pending[executor.submit(process_paper, paper, score, key)] = index
                     while pending:
                         collect_ready(block=True)
                 except BaseException:

@@ -1,6 +1,7 @@
 """Implementation guideline."""
 
 import time
+import os
 
 import humanize
 
@@ -8,6 +9,9 @@ import humanize
 def get_impl_guideline_from_agent(agent):
     """Build implementation guideline from agent config."""
     tot_time_remaining = agent.acfg.time_limit - (time.time() - agent.start_time)
+    if os.environ.get("MLEVOLVE_RUN_DEADLINE"):
+        tot_time_remaining = min(tot_time_remaining, float(os.environ["MLEVOLVE_RUN_DEADLINE"]) - time.time())
+    tot_time_remaining = max(0, tot_time_remaining)
     exec_timeout = int(min(agent.cfg.exec.timeout, tot_time_remaining))
     return get_impl_guideline(
         tot_time_remaining=tot_time_remaining,

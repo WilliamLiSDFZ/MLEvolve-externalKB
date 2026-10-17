@@ -17,6 +17,7 @@ from typing import List, Tuple, Dict, Any
 
 from llm import generate, compile_prompt_to_md
 from utils.response import extract_code, extract_text_up_to_code, wrap_code
+from engine.coldstart.technique_reranker import check_context_budget
 from agents.planner.base_planner import (
     PLANNING_ALLOWED_MODULES,
     PLANNING_JSON_FORMAT,
@@ -66,6 +67,9 @@ class StepAgent:
             previous_module_code=previous_module_code,
             improvement_strategy=improvement_strategy,
         )
+        if context.stage == "draft" and getattr(agent_instance, "draft_techniques", ""):
+            check_context_budget(prompt, agent_instance.cfg.draft_techniques.context_window,
+                                 output_tokens=32768)
 
         completion_text = None
         for _ in range(retries):
@@ -280,6 +284,9 @@ class MetaAgent:
             agent_instance=agent_instance,
             context=context,
         )
+        if context.stage == "draft" and getattr(agent_instance, "draft_techniques", ""):
+            check_context_budget(prompt, agent_instance.cfg.draft_techniques.context_window,
+                                 output_tokens=32768)
 
         completion_text = None
         for _ in range(retries):

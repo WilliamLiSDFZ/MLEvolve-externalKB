@@ -108,6 +108,15 @@ class AgentSearch:
         else:
             logger.info("[AgentSearch] Global memory is disabled by config")
 
+        self.draft_techniques = ""
+        if getattr(getattr(cfg, "draft_techniques", None), "enabled", False):
+            from engine.coldstart.draft_techniques import prepare_draft_techniques
+
+            # Complete once before any sequential or concurrent draft can start.
+            self.update_data_preview()
+            self.search_start_time = time.time()
+            self.draft_techniques = prepare_draft_techniques(self)
+
     def _serialize_prompt(self, prompt_complete) -> str | None:
         """Serialize prompt (str or dict) to string for saving in node."""
         if prompt_complete is None:

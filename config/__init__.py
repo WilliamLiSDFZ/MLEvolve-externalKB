@@ -133,6 +133,13 @@ class CorpusRetrieverConfig:
 
 
 @dataclass
+class DraftTechniquesConfig:
+    enabled: bool = False
+    cache_dir: str = "cache/techinique"
+    context_window: int = 258400
+
+
+@dataclass
 class Config(Hashable):
     data_dir: Path
     dataset_dir: Path
@@ -193,6 +200,7 @@ class Config(Hashable):
     use_grading_server: bool = True
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)
     corpus_retriever: CorpusRetrieverConfig = field(default_factory=CorpusRetrieverConfig)
+    draft_techniques: DraftTechniquesConfig = field(default_factory=DraftTechniquesConfig)
 
 
 def _get_next_logindex(dir: Path) -> int:

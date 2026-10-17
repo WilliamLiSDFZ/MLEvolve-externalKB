@@ -196,7 +196,7 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
     """Return pretrained-model guidance without retrieving or injecting literature.
 
     Paper retrieval is a separate, manually started preparation step. Task-specific
-    techniques are not loaded here until their injection policy is defined.
+    techniques are loaded separately by AgentSearch when draft_techniques is enabled.
     """
     tasks = _load_json(cfg.coldstart.task_json_path)
     models = _load_json(cfg.coldstart.model_json_path)
@@ -212,6 +212,6 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
         logger.warning(
             "Automatic literature retrieval is disabled; legacy methodology settings "
             "are ignored. Run python -m corpus_retriever manually before experiments. "
-            "Task-specific techniques are not automatically injected."
+            "Enable draft_techniques.enabled to rank prepared techniques for drafts."
         )
     return text
