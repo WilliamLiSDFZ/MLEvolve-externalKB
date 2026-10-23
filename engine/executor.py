@@ -74,29 +74,42 @@ class Interpreter:
                 "ensure that each process has at least one CPU core."
             )
         self.lock = Lock()
+        self._stopping = False
         self._procs_lock = threading.Lock()
         self._active_procs: dict[int, subprocess.Popen] = {}
 
+    @staticmethod
+    def _signal_process_tree(proc, sig):
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            elif proc.poll() is None:
+                proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
     def terminate_all_subprocesses(self) -> None:
         """Terminate all active subprocesses (for graceful Ctrl+C exit)."""
+        with self.lock:
+            self._stopping = True
         with self._procs_lock:
             procs = list(self._active_procs.items())
-            self._active_procs.clear()
         for slot_id, proc in procs:
             try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+                self._signal_process_tree(proc, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                self._signal_process_tree(proc, signal.SIGKILL)
+                proc.wait()
             except Exception as e:
                 logger.warning(f"Error terminating subprocess slot {slot_id}: {e}")
 
     def check_current_status(self):
         """Check current parallel run number."""
-        return self.current_parallel_run < self.max_parallel_run
+        with self.lock:
+            return not self._stopping and self.current_parallel_run < self.max_parallel_run
 
     def isolate_submission_path(self, code: str, _id) -> str:
         """Per-process submission filename to avoid write conflicts."""
@@ -181,11 +194,13 @@ class Interpreter:
         process_id = None
 
         with self.lock:
-            self.current_parallel_run += 1
+            if self._stopping:
+                raise RuntimeError("Interpreter is stopping; candidate execution cancelled")
             for idx in range(self.max_parallel_run):
                 if self.status_map[idx] == 0:
                     self.status_map[idx] = 1
                     process_id = idx
+                    self.current_parallel_run += 1
                     logger.info(f"Assigned process_id: {process_id}")
                     break
                 elif idx == self.max_parallel_run - 1:
@@ -218,17 +233,21 @@ class Interpreter:
                 f.write(code)
 
             cmd = [sys.executable, str(runfile_path)]
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(run_wd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            with self._procs_lock:
-                self._active_procs[process_id] = proc
+            with self.lock:
+                if self._stopping:
+                    raise RuntimeError("Interpreter stopped before candidate launch")
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(run_wd),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                    start_new_session=(os.name == "posix"),
+                )
+                with self._procs_lock:
+                    self._active_procs[process_id] = proc
 
             child_in_overtime = False
             exc_type = None
@@ -310,11 +329,11 @@ class Interpreter:
             except subprocess.TimeoutExpired:
                 logger.warning("Subprocess timeout, sending SIGINT...")
                 try:
-                    proc.send_signal(signal.SIGINT)
+                    self._signal_process_tree(proc, signal.SIGINT)
                     stdout, stderr = proc.communicate(timeout=2)
                 except subprocess.TimeoutExpired:
                     logger.warning("Subprocess failed to terminate after SIGINT, killing...")
-                    proc.kill()
+                    self._signal_process_tree(proc, signal.SIGKILL)
                     stdout, stderr = proc.communicate()
                 
                 exec_time = time.time() - start_time
@@ -357,22 +376,24 @@ class Interpreter:
                 exc_stack=[],
             )
         finally:
-            if process_id is not None:
-                with self._procs_lock:
-                    self._active_procs.pop(process_id, None)
             if proc is not None:
                 try:
                     if proc.poll() is None:
                         logger.warning(f"Subprocess {process_id} still running, terminating...")
-                        proc.terminate()
+                        self._signal_process_tree(proc, signal.SIGTERM)
                         try:
                             proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             logger.warning(f"Subprocess {process_id} failed to terminate, killing...")
-                            proc.kill()
+                            self._signal_process_tree(proc, signal.SIGKILL)
                             proc.wait()
+                    # DataLoader/background children must not outlive their execution slot.
+                    self._signal_process_tree(proc, signal.SIGKILL)
                 except Exception as e:
                     logger.warning(f"Error cleaning up subprocess {process_id}: {e}")
+            if process_id is not None:
+                with self._procs_lock:
+                    self._active_procs.pop(process_id, None)
             
             try:
                 if runfile_path and runfile_path.exists():
