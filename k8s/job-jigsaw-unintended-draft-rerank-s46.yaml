@@ -1,0 +1,169 @@
+# Paired unintended-bias experiment, seed 46: baseline vs. draft Top-25 reranking.
+# Both arms retain pretrained-model guidance; only the rerank arm injects corpus techniques.
+# Uses the prepared task corpus at cache/techinique/<task_name>; does not run retrieval.
+# Two A10 GPUs per pair; 12-hour agent budget inside the 24-hour Job deadline.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-draft-base-s46
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-draft-rerank
+    seed: "46"
+    arm: a-baseline
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-draft-rerank
+        seed: "46"
+        arm: a-baseline
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-A10
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-draft-base-s46"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: TIME_LIMIT_SECS
+          value: "43200"
+        - name: SERVER_ID
+          value: "86"
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=46
+            agent.time_limit=43200
+            coldstart.use_coldstart=True
+            coldstart.inject_into_improve=False
+            methodology_retrieval=none
+            draft_techniques.enabled=False
+            draft_techniques.cache_dir=/workspace/MLEvolve/cache/techinique
+            draft_techniques.context_window=258400
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-draft-rerank-s46
+  labels:
+    app: mlevolve
+    experiment: jigsaw-unintended-draft-rerank
+    seed: "46"
+    arm: b-draft-rerank
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jigsaw-unintended-draft-rerank
+        seed: "46"
+        arm: b-draft-rerank
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-A10
+      restartPolicy: Never
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command: ["bash", "/workspace/MLEvolve/k8s/entrypoint.sh"]
+        env:
+        - name: EXP_ID
+          value: "jigsaw-unintended-bias-in-toxicity-classification"
+        - name: DATASET_DIR
+          value: "/workspace/data/mlebench"
+        - name: REPO_DIR
+          value: "/workspace/MLEvolve"
+        - name: EXP_NAME
+          value: "jubias-draft-rerank-s46"
+        - name: CPUS_PER_TASK
+          value: "8"
+        - name: TIME_LIMIT_SECS
+          value: "43200"
+        - name: SERVER_ID
+          value: "87"
+        - name: EXTRA_RUN_ARGS
+          value: >-
+            agent.seed=46
+            agent.time_limit=43200
+            coldstart.use_coldstart=True
+            coldstart.inject_into_improve=False
+            methodology_retrieval=none
+            draft_techniques.enabled=True
+            draft_techniques.cache_dir=/workspace/MLEvolve/cache/techinique
+            draft_techniques.context_window=258400
+        - name: LLM_BASE_URL
+          value: "http://cliproxy:8317/v1"
+        - name: LLM_MODEL
+          value: "gpt-5.6-terra"
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
