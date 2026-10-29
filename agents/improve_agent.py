@@ -99,7 +99,8 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
     return text
 
 
-def run(agent, parent_node: SearchNode) -> SearchNode:
+def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) -> SearchNode:
+    """Improve once; explicit replay text (including empty text) bypasses retrieval."""
     improvement_standards = (
         "🎯 As a Grandmaster, make MEANINGFUL improvements that boost leaderboard performance.\n\n"
         "**Acceptable**: Advanced architectures, ensemble techniques, feature engineering, hyperparameter optimization, improved pipelines.\n"
@@ -129,7 +130,18 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     # renders above the strategy blocks below, which refer to it on a plateau. The report is
     # capped at analogy.report_char_budget because this prompt is already very long and
     # over-long context degrades adherence to the strict CHANGES/WHY/HOW format below.
-    analogy_report = _inject_analogy(agent, prompt, parent_node)
+    if injection_text is None:
+        analogy_report = _inject_analogy(agent, prompt, parent_node)
+    else:
+        analogy_report = injection_text
+        if injection_text:
+            prompt["Instructions"]["Supplementary material"] = [
+                "Use the following material only if it helps improve the current solution. "
+                "Ignore it if it is not useful for this task. If you use it, explain what you "
+                "used and why in WHY/HOW.",
+                "",
+                injection_text,
+            ]
 
     success_patience, total_patience, branch_best_score = get_patience_counter(agent, parent_node)
     use_magnitude_prompt = (success_patience >= 2) or (total_patience >= 5)

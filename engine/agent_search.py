@@ -34,11 +34,14 @@ class AgentSearch:
             task_desc: str,
             cfg: Config,
             journal: Journal,
+            *,
+            metric_maximize: bool | None = None,
+            task_desc_is_clean: bool = False,
     ):
         self.cfg = cfg
         self.acfg = cfg.agent
         self.scfg = cfg.agent.search
-        self.task_desc = clean_task_desc(task_desc, cfg)
+        self.task_desc = task_desc if task_desc_is_clean else clean_task_desc(task_desc, cfg)
         self.journal = journal
         self.data_preview: str | None = None
         self.current_step = 0
@@ -92,7 +95,11 @@ class AgentSearch:
 
         self.metric_maximize: bool | None = None
         self.metric_maximize_reasoning: str | None = None
-        result_parse_agent.determine_metric_direction(self)
+        if metric_maximize is None:
+            result_parse_agent.determine_metric_direction(self)
+        else:
+            self.metric_maximize = metric_maximize
+            self.metric_maximize_reasoning = "Restored from replay parent metric"
 
         # Global memory
         self.global_memory = None

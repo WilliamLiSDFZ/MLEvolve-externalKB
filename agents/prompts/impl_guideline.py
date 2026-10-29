@@ -7,8 +7,11 @@ import humanize
 
 def get_impl_guideline_from_agent(agent):
     """Build implementation guideline from agent config."""
-    tot_time_remaining = agent.acfg.time_limit - (time.time() - agent.start_time)
-    tot_time_remaining = max(0, min(tot_time_remaining, getattr(agent, "runtime_deadline", float("inf")) - time.time()))
+    # Paired replays must show the same budget regardless of retrieval latency.
+    tot_time_remaining = getattr(agent, "replay_budget_seconds", None)
+    if tot_time_remaining is None:
+        tot_time_remaining = agent.acfg.time_limit - (time.time() - agent.start_time)
+        tot_time_remaining = max(0, min(tot_time_remaining, getattr(agent, "runtime_deadline", float("inf")) - time.time()))
     exec_timeout = int(min(agent.cfg.exec.timeout, tot_time_remaining))
     runtime = getattr(agent.cfg, "candidate_runtime", None)
     if getattr(runtime, "enabled", False):
