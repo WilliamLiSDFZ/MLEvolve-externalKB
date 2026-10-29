@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify GPT-5.6 Sol/high through the actual MLEvolve Responses wrappers.
 
-Run on CPU: python utils/verify_sol_proxy.py --output-dir /tmp/sol-proxy-test
+Run on CPU: python tests/verify_sol_proxy.py --output-dir /tmp/sol-proxy-test
 Credentials come from LLM_API_KEY/LLM_BASE_URL, or --config pointing to an existing
 run's saved config. Never pass credentials in arguments. Six short requests on a
 successful run test streaming text, JSON, feedback and two synthetic tool rounds.
@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 import llm
 from llm.responses import (function_tool, make_response_client, request_response,
                            response_function_calls, response_text, response_usage)
-from utils.verify_gpt6_proxy import redact, request_deadline
+from tests.verify_gpt6_proxy import redact, request_deadline
 
 MODEL = "gpt-5.6-sol"
 

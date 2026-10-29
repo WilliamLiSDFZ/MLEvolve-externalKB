@@ -1,6 +1,6 @@
 """CPU regressions for real review schemas and agents through the Responses SDK.
 
-Run: python utils/verify_review_contracts.py
+Run: python tests/verify_review_contracts.py
 Only HTTP responses and grading are mocked; no API calls, training or credentials.
 """
 

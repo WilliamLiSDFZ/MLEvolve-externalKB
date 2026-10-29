@@ -15,9 +15,9 @@ Use the shared Linux environment from the dev pod after checking that no MLEvolv
 training/grading process will switch metric definitions midway through a run:
 
 ```bash
-/workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/utils/verify_mlebench_grading.py --candidate
+/workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/tests/verify_mlebench_grading.py --candidate
 /workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/utils/mlebench_patch.py --apply
-/workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/utils/verify_mlebench_grading.py
+/workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/tests/verify_mlebench_grading.py
 /workspace/MLEvolve/.venv/bin/python /workspace/MLEvolve/utils/mlebench_patch.py --check
 ```
 

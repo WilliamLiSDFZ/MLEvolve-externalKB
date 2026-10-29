@@ -1,6 +1,6 @@
 """Offline observation-loop tests: source evidence, tool replay and budgets.
 
-Run: python utils/verify_analogy_observation.py
+Run: python tests/verify_analogy_observation.py
 Uses real source/fulltext session code and mocked Responses calls. No network,
 candidate execution, model inference or private validation labels are accessed.
 """

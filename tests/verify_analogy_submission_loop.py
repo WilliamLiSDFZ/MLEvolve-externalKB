@@ -1,6 +1,6 @@
 """Offline P0 submission-loop/artifact regressions.
 
-Run: python utils/verify_analogy_submission_loop.py
+Run: python tests/verify_analogy_submission_loop.py
 Reuses observation fixtures and mocks model transport; no API, cluster, training,
 or private-label access. Artifact writes are limited to temporary directories.
 """
@@ -14,7 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from utils import verify_analogy_observation as fixtures
+from tests import verify_analogy_observation as fixtures
 from engine.analogy import agent, observed_loop, report_v2
 
 

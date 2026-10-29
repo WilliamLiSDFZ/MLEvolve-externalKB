@@ -61,8 +61,8 @@ an empty mechanisms array with `abstention_reason`; old empty reports still work
 
 No mechanism-state probes, candidate early-stop behavior, new node type, scoring,
 model or Job changes are included in P0. Targeted offline regressions are
-`utils/verify_analogy_report_delivery.py` and
-`utils/verify_analogy_submission_loop.py` alongside the existing context,
+`tests/verify_analogy_report_delivery.py` and
+`tests/verify_analogy_submission_loop.py` alongside the existing context,
 observation, full-text, handoff and Responses checks.
 
 The conversation cap includes messages, tools, tool outputs and response items.
@@ -179,7 +179,7 @@ estimated by bytes. Limits and opaque-state replay remain intact. See the
 CPU verification scripts are `verify_analogy_context.py`,
 `verify_runtime_diagnostics.py`, `verify_analogy_observation.py`,
 `verify_analogy_handoff.py`, `verify_gpt6_transport.py`, and
-`verify_gpt6_configuration.py` under `utils/`. Existing full-text, injection,
+`verify_gpt6_configuration.py` under `tests/`. Existing full-text, injection,
 candidate-runtime, execution-pipeline and best-result regressions remain applicable.
 
 ```bash
@@ -214,7 +214,7 @@ against shared-proxy rate limits.
 A CPU-only live SDK probe uses the exact Sol model with no fallback:
 
 ```bash
-python utils/verify_sol_proxy.py --output-dir /tmp/sol-proxy-test
+python tests/verify_sol_proxy.py --output-dir /tmp/sol-proxy-test
 ```
 
 Provide `LLM_API_KEY` / `LLM_BASE_URL` through the environment, or `--config` pointing

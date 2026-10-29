@@ -6,7 +6,7 @@ LLM_MODEL: a stale Secret must not turn this into a GPT-5 test. No model fallbac
 automatic retries, package installs, training, or changes to the shared proxy.
 
 Example (credentials supplied through the environment, never command arguments):
-    python utils/verify_gpt6_proxy.py --output-dir /tmp/gpt6-proxy-test
+    python tests/verify_gpt6_proxy.py --output-dir /tmp/gpt6-proxy-test
 
 Seven short generation requests on a successful run, plus GET /models. Defaults:
 gpt-6-astra, reasoning high, 8192 output tokens/request (including reasoning),

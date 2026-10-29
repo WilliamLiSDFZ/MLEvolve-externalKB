@@ -1,6 +1,6 @@
 """CPU regressions for explicit analogy selection, coder handoff and provenance.
 
-Run: python utils/verify_analogy_handoff.py
+Run: python tests/verify_analogy_handoff.py
 All model calls are mocked. No cluster or live API calls are made.
 """
 

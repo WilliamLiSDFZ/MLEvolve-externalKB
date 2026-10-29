@@ -1,6 +1,6 @@
 """Offline regressions for paired replay inputs and frozen prompt budgets.
 
-Run: python utils/verify_replay_injection.py
+Run: python tests/verify_replay_injection.py
 Generation is mocked; no API, corpus, training or GPU is needed.
 """
 

@@ -1,6 +1,6 @@
 """Offline GPT-6 transport regressions using the real SDK and httpx MockTransport.
 
-Run: python utils/verify_gpt6_transport.py
+Run: python tests/verify_gpt6_transport.py
 No endpoint, credentials, model requests or GPU are used. Supports the project's
 pinned openai==1.66.3 through its generic JSON and SSE transport.
 """

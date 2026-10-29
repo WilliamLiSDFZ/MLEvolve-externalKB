@@ -2,7 +2,7 @@
 """CPU-only verification of analogy context and source tools; never calls an LLM.
 
 Optional historical packet audit:
-  python utils/verify_analogy_context.py --historical-root /path/to/fetched/results
+  python tests/verify_analogy_context.py --historical-root /path/to/fetched/results
 """
 from __future__ import annotations
 

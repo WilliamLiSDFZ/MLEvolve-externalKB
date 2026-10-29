@@ -16,7 +16,7 @@ python replay_improve.py \
 
 另三个 Job 使用相同参数，只把 `--arm` 改成 `B`、`C`、`D`。所有四组都要传相同
 `--corpus`，即使 A/B 不读论文。默认 `--runs-root` 是当前仓库的 `runs/`。
-当前不提供 Job YAML。
+已提供 [三个 seed、每个四个 arm 的 Job 配置](../k8s/replay-abcd.md)。
 
 父节点必须是 `logs/journal.json` 中已有、成功且有效的非 root 节点，传完整 `id`，
 不接受 step 或 ID 前缀。它可以是 draft、debug 或 improve 等阶段产生的成功节点；
@@ -121,6 +121,6 @@ runs/replay_<experiment_id>/
 `artifact_status`；`status=failed` 保存准备/执行流程的异常。无有效分数时保持 null，
 不会用 0 代替失败。
 
-离线检查：`python utils/verify_replay_improve.py`、`verify_replay_state.py`、
-`verify_replay_inputs.py`、`verify_replay_injection.py`（后三个也在 `utils/` 下）。
+离线检查：`python tests/verify_replay_improve.py`、`verify_replay_state.py`、
+`verify_replay_inputs.py`、`verify_replay_injection.py`（后三个也在 `tests/` 下）。
 这些检查 mock LLM；入口测试会实际执行一个只写小 CSV 的 Python 子进程。

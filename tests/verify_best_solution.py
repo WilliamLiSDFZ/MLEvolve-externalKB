@@ -1,4 +1,4 @@
-"""Best-result persistence regressions: python utils/verify_best_solution.py.
+"""Best-result persistence regressions: python tests/verify_best_solution.py.
 
 Uses real threads and temporary files, with no ML/LLM dependencies. Top-K disk
 output is disabled in the focused race/failure checks to isolate the best result.

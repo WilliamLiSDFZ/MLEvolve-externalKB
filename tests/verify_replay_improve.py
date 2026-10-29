@@ -225,7 +225,7 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(actual, records[:1])
 
     def test_runtime_history_keeps_code_and_verified_diagnostics_without_weights(self):
-        from utils.verify_runtime_diagnostics import DiagnosticTests
+        from tests.verify_runtime_diagnostics import DiagnosticTests
         from engine.candidate_runtime.diagnostics import build_runtime_context
         from engine.analogy.code_tools import CodeReadingSession
 

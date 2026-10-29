@@ -236,9 +236,9 @@ search updates and global-memory writes wait until all initial drafts are genera
 ## Validation and rollout
 
 ```bash
-python utils/verify_candidate_runtime.py
-python utils/verify_execution_pipeline.py
-python utils/verify_best_solution.py
+python tests/verify_candidate_runtime.py
+python tests/verify_execution_pipeline.py
+python tests/verify_best_solution.py
 # In Agentic_Knowledge_Base:
 python scripts/verify_candidate_runtime_analysis.py
 ```

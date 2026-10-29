@@ -101,7 +101,7 @@ if ! python -c "import mlebench" 2>/dev/null; then
 fi
 # Existing installs must be checked too; importing mlebench cannot detect the AUC bug.
 python utils/mlebench_patch.py --apply
-python utils/verify_mlebench_grading.py
+python tests/verify_mlebench_grading.py
 
 python -c "import torch, mlebench; print('[setup] OK — torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 echo "[setup] Done. Jobs can now use VENV_DIR=${VENV_DIR}"

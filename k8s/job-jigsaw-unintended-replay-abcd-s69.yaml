@@ -1,0 +1,374 @@
+# One-step replay, seed 69: A=no text, B=NLTK filler, C=unrelated paper, D=analogy.
+# All four jobs share the same saved parent and source validation contract (seed 60).
+# Replay seed changes material/local RNG; it does not rewrite training seeds in parent code.
+# Prerequisite: sync feature/noise_effect into /workspace/MLEvolve.
+# A10 only; replay timeout 6 h, whole Job deadline 9 h.
+# See replay-abcd.md. No checkout switch, git pull, or package install on the PVC.
+# kubectl --context nautilus -n ecepxie apply -f k8s/job-jigsaw-unintended-replay-abcd-s69.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-replay-a-s69
+  labels:
+    app: mlevolve
+    experiment: jubias-replay-abcd
+    repeat: '69'
+    arm: a
+    model-family: gpt56sol
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 32400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jubias-replay-abcd
+        repeat: '69'
+        arm: a
+        model-family: gpt56sol
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/replay-entrypoint.sh
+        env:
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: VENV_DIR
+          value: /workspace/MLEvolve/.venv
+        - name: SOURCE_RUN
+          value: 20260914_071735_jubias-base-gpt56sol-s60
+        - name: PARENT_NODE_ID
+          value: 36845c7c3f1c4beca8eebc7a37852e7c
+        - name: REPLAY_EXPERIMENT_ID
+          value: jubias-noise-parent5-s69
+        - name: REPLAY_ARM
+          value: A
+        - name: REPLAY_SEED
+          value: '69'
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-5.6-sol
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
+        - name: MLEVOLVE_REQUIRED_REASONING_EFFORT
+          value: high
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-replay-b-s69
+  labels:
+    app: mlevolve
+    experiment: jubias-replay-abcd
+    repeat: '69'
+    arm: b
+    model-family: gpt56sol
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 32400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jubias-replay-abcd
+        repeat: '69'
+        arm: b
+        model-family: gpt56sol
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/replay-entrypoint.sh
+        env:
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: VENV_DIR
+          value: /workspace/MLEvolve/.venv
+        - name: SOURCE_RUN
+          value: 20260914_071735_jubias-base-gpt56sol-s60
+        - name: PARENT_NODE_ID
+          value: 36845c7c3f1c4beca8eebc7a37852e7c
+        - name: REPLAY_EXPERIMENT_ID
+          value: jubias-noise-parent5-s69
+        - name: REPLAY_ARM
+          value: B
+        - name: REPLAY_SEED
+          value: '69'
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-5.6-sol
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
+        - name: MLEVOLVE_REQUIRED_REASONING_EFFORT
+          value: high
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-replay-c-s69
+  labels:
+    app: mlevolve
+    experiment: jubias-replay-abcd
+    repeat: '69'
+    arm: c
+    model-family: gpt56sol
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 32400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jubias-replay-abcd
+        repeat: '69'
+        arm: c
+        model-family: gpt56sol
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/replay-entrypoint.sh
+        env:
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: VENV_DIR
+          value: /workspace/MLEvolve/.venv
+        - name: SOURCE_RUN
+          value: 20260914_071735_jubias-base-gpt56sol-s60
+        - name: PARENT_NODE_ID
+          value: 36845c7c3f1c4beca8eebc7a37852e7c
+        - name: REPLAY_EXPERIMENT_ID
+          value: jubias-noise-parent5-s69
+        - name: REPLAY_ARM
+          value: C
+        - name: REPLAY_SEED
+          value: '69'
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-5.6-sol
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
+        - name: MLEVOLVE_REQUIRED_REASONING_EFFORT
+          value: high
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlevolve-jubias-replay-d-s69
+  labels:
+    app: mlevolve
+    experiment: jubias-replay-abcd
+    repeat: '69'
+    arm: d
+    model-family: gpt56sol
+    context-version: '2'
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 32400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        app: mlevolve
+        experiment: jubias-replay-abcd
+        repeat: '69'
+        arm: d
+        model-family: gpt56sol
+        context-version: '2'
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+      containers:
+      - name: mlevolve
+        image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+        command:
+        - bash
+        - /workspace/MLEvolve/k8s/replay-entrypoint.sh
+        env:
+        - name: REPO_DIR
+          value: /workspace/MLEvolve
+        - name: VENV_DIR
+          value: /workspace/MLEvolve/.venv
+        - name: SOURCE_RUN
+          value: 20260914_071735_jubias-base-gpt56sol-s60
+        - name: PARENT_NODE_ID
+          value: 36845c7c3f1c4beca8eebc7a37852e7c
+        - name: REPLAY_EXPERIMENT_ID
+          value: jubias-noise-parent5-s69
+        - name: REPLAY_ARM
+          value: D
+        - name: REPLAY_SEED
+          value: '69'
+        - name: LLM_BASE_URL
+          value: http://cliproxy:8317/v1
+        - name: LLM_MODEL
+          value: gpt-5.6-sol
+        - name: LLM_REASONING_EFFORT
+          value: high
+        - name: MLEVOLVE_REQUIRED_MODEL
+          value: gpt-5.6-sol
+        - name: MLEVOLVE_REQUIRED_REASONING_EFFORT
+          value: high
+        envFrom:
+        - secretRef:
+            name: mlevolve-llm-proxy
+        resources:
+          requests:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: '8'
+            memory: 48Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: yuze-li-vol
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

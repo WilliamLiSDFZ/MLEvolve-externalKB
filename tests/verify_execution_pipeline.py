@@ -1,4 +1,4 @@
-"""CPU-only behavioral regressions: python utils/verify_execution_pipeline.py.
+"""CPU-only behavioral regressions: python tests/verify_execution_pipeline.py.
 
 Uses real candidate subprocesses and synchronization barriers; mocks GPU discovery and
 LLM generation only. No cluster, model downloads, API requests or training required.

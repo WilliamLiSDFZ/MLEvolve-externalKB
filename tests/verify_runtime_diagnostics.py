@@ -1,6 +1,6 @@
 """CPU checks for public diagnostics, immutable provenance and unchanged scoring.
 
-Run: python utils/verify_runtime_diagnostics.py
+Run: python tests/verify_runtime_diagnostics.py
 No model/cluster requests, training, test predictions or private labels are used.
 """
 

@@ -1,6 +1,6 @@
 """CPU regressions for candidate validation, durable exports and timeout recovery.
 
-Run: python utils/verify_candidate_runtime.py
+Run: python tests/verify_candidate_runtime.py
 No cluster, model downloads, private labels or LLM calls are used.
 """
 

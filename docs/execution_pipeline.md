@@ -71,7 +71,7 @@ to it; do not pull this change into their shared `/workspace/MLEvolve` checkout 
 ## Verification
 
 ```bash
-python utils/verify_execution_pipeline.py
+python tests/verify_execution_pipeline.py
 ```
 
 The CPU-only regressions use real candidate subprocesses with mocked GPU discovery and

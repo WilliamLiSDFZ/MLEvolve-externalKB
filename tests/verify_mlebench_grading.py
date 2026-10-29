@@ -2,6 +2,7 @@
 
 import argparse
 import runpy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,10 +11,8 @@ import numpy as np
 import pandas as pd
 from mlebench.grade_helpers import InvalidSubmissionError
 
-if __package__:
-    from . import mlebench_patch as fix
-else:
-    import mlebench_patch as fix
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils import mlebench_patch as fix
 
 
 def pairwise_auc(y, scores):

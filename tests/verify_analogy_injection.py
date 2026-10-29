@@ -25,7 +25,7 @@ Checks, in order:
      output tail is taken, so the epoch/score lines survive; a debug node's placeholder plan
      ("Parent error: …") is labelled as the failure it fixed rather than shown as its design.
 
-Run:  python utils/verify_analogy_injection.py
+Run:  python tests/verify_analogy_injection.py
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """CPU-only reading regressions; optional live publisher/cache smoke test (no LLM calls).
 
-python utils/verify_analogy_fulltext.py
-python utils/verify_analogy_fulltext.py --corpus /path/to/paper_corpus \
+python tests/verify_analogy_fulltext.py
+python tests/verify_analogy_fulltext.py --corpus /path/to/paper_corpus \
     --paper-id venue/id --cache /shared/paper_fulltext --out smoke.json [--offline]
 """
 from __future__ import annotations

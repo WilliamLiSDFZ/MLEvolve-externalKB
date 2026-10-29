@@ -1,6 +1,6 @@
 # Standalone CPU-only GPT-6 compatibility probe against the EXISTING shared proxy.
 # First sync these two new files via Git to /workspace/MLEvolve on the PVC:
-#   utils/verify_gpt6_proxy.py
+#   tests/verify_gpt6_proxy.py
 #   k8s/job-gpt6-proxy-test.yaml
 # No installs, shared-venv changes, proxy restarts, or experiment configuration changes.
 #
@@ -41,7 +41,7 @@ spec:
       containers:
       - name: gpt6-proxy-test
         image: python:3.11-slim
-        command: ["python3", "-u", "/workspace/MLEvolve/utils/verify_gpt6_proxy.py"]
+        command: ["python3", "-u", "/workspace/MLEvolve/tests/verify_gpt6_proxy.py"]
         args:
         - "--output-dir"
         - "/workspace/results/gpt6-proxy-test"

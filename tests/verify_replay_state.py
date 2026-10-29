@@ -1,4 +1,4 @@
-"""Offline journal replay regressions: python utils/verify_replay_state.py."""
+"""Offline journal replay regressions: python tests/verify_replay_state.py."""
 
 import copy
 import json
