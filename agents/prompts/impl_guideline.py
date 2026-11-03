@@ -1,8 +1,32 @@
 """Implementation guideline."""
 
+import json
 import time
 
 import humanize
+
+
+def mac_replay_guidance(agent):
+    """Shared generation/review constraints for the explicitly selected Mac replay."""
+    environment = getattr(agent, "replay_environment", {})
+    return [
+        "**Mac replay execution profile: mac-mps**",
+        "Train and predict on torch.device('mps') with float32 model weights and floating-point tensors. "
+        "Do not select CUDA, CUDA AMP, or silently fall back to CPU training; unsupported operations must be reported. "
+        "Global-memory embeddings run on CPU independently of candidate training.",
+        "Keep SciPy CSR/text preprocessing on CPU. Move ordinary row/col index tensors and float32 values to MPS; "
+        "use gather/index_select and index_add for the existing sparse-feature computation. "
+        "Do not construct or move sparse COO/CSR tensors on MPS, or densify the full feature matrix.",
+        "Use DataLoader(num_workers=0); omit prefetch_factor and disable persistent_workers. "
+        "Keep script execution under if __name__ == '__main__' when introducing subprocesses.",
+        "Preserve the replay validation split, training seed, objective and execution budget. "
+        "Historical GPU timings/scores are source evidence, not measurements of this Mac; "
+        "evaluate the child against the separately measured Mac parent baseline.",
+        "Installed package versions from the Mac preflight (do not assume availability for missing/unknown entries): "
+        + json.dumps(environment.get("packages", {}), ensure_ascii=False, sort_keys=True),
+        "Do not assume other packages, pretrained weights or network downloads are available. "
+        "Use the recorded environment and explicitly provided local assets.",
+    ]
 
 
 def get_impl_guideline_from_agent(agent):
@@ -45,6 +69,11 @@ def get_impl_guideline_from_agent(agent):
             f"{humanize.naturaldelta(min(runtime.candidate_budget_seconds or agent.cfg.exec.timeout, exec_timeout))}. "
             "The runtime's remaining() is authoritative after queueing and model loading."
         )
+    if getattr(agent, "replay_profile", None) == "mac-mps":
+        result["Implementation guideline"] = [line for line in result["Implementation guideline"]
+            if not any(text in line for text in ("📦 **Packages & Internet**", "allocated CUDA GPU",
+                                                 "num_workers>=2", "NO tqdm (not installed)"))]
+        result["Implementation guideline"].extend(mac_replay_guidance(agent))
     return result
 
 

@@ -85,3 +85,8 @@ CODE_ANALYSIS_REPORT.md
 PROMPT_COMPARISON_REPORT.md
 
 *.DS_Store
+
+# Explicit Mac replay environment and outputs
+.env.mac
+runs_mac_mps/
+mac_baselines/

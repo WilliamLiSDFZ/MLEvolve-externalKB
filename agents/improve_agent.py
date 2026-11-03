@@ -143,7 +143,11 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
                 injection_text,
             ]
 
-    success_patience, total_patience, branch_best_score = get_patience_counter(agent, parent_node)
+    if getattr(agent, "replay_profile", None) == "mac-mps":
+        # Platform migration is not a failed improvement; do not infer stagnation across devices.
+        success_patience, total_patience, branch_best_score = 0, 0, parent_node.metric.value
+    else:
+        success_patience, total_patience, branch_best_score = get_patience_counter(agent, parent_node)
     use_magnitude_prompt = (success_patience >= 2) or (total_patience >= 5)
 
     if use_magnitude_prompt:
@@ -311,8 +315,9 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
 
     prompt["Instructions"] |= get_impl_guideline_from_agent(agent)
     prompt["Instructions"] |= prompt_leakage_prevention()
-    internet_clarification = get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", ""))
-    prompt["Instructions"]["Implementation guideline"].extend(internet_clarification)
+    if getattr(agent, "replay_profile", None) != "mac-mps":
+        internet_clarification = get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", ""))
+        prompt["Instructions"]["Implementation guideline"].extend(internet_clarification)
     prompt["Instructions"] |= ROBUSTNESS_GENERALIZATION_STRATEGY
 
     output = wrap_code(parent_node.term_out, lang="")

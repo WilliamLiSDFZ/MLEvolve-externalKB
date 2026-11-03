@@ -124,3 +124,9 @@ runs/replay_<experiment_id>/
 离线检查：`python tests/verify_replay_improve.py`、`verify_replay_state.py`、
 `verify_replay_inputs.py`、`verify_replay_injection.py`（后三个也在 `tests/` 下）。
 这些检查 mock LLM；入口测试会实际执行一个只写小 CSV 的 Python 子进程。
+
+## 可选 Mac MPS 模式
+
+Apple Silicon 本机运行需显式传入 `--profile mac-mps`，使用本机 Python 3.14 `.venv`、独立输出目录和
+一次性校准的共同 Mac 父节点。省略该参数继续使用本文原来的集群流程。
+准备输入、手动校准和 A/B/C/D 命令见 [Mac MPS replay](replay_macos.md)。

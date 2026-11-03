@@ -59,7 +59,9 @@ class EmbeddingModel:
 
         if model_type == "local":
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
+            # Avoid initially loading CPU memory retrieval onto the Mac training GPU.
+            self.model = (SentenceTransformer(model_name, device="cpu") if self.device == "cpu"
+                          else SentenceTransformer(model_name))
             if hasattr(self.model, 'to'):
                 self.model = self.model.to(self.device)
             self.dimension = self.model.get_sentence_embedding_dimension()

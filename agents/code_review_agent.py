@@ -8,6 +8,7 @@ from llm import FunctionSpec, query
 from engine.search_node import SearchNode
 from agents.prompts.validation_template_prompts import get_code_review_prompt
 from agents.prompts import get_internet_clarification
+from agents.prompts.impl_guideline import mac_replay_guidance
 
 from agents.coder.diff_coder import SearchReplacePatcher
 
@@ -68,7 +69,9 @@ def run(agent, node: SearchNode) -> str:
         task_desc=agent.task_desc,
         code=node.code,
     )
-    internet_clarification = get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", ""))
+    mac_replay = getattr(agent, "replay_profile", None) == "mac-mps"
+    internet_clarification = ([] if mac_replay else
+        get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", "")))
     if "Instructions" not in prompt:
         prompt["Instructions"] = {}
     if getattr(getattr(agent.cfg, "candidate_runtime", None), "enabled", False):
@@ -85,7 +88,17 @@ def run(agent, node: SearchNode) -> str:
             "on legacy submission paths; consume result['submission_path'] instead. "
             "Each predict callback must preserve row order and restore model mode."
         )
-    if "Implementation guideline" in prompt["Instructions"]:
+    if mac_replay:
+        prompt["Instructions"]["Code review guidelines"] = [line for line in prompt["Instructions"]["Code review guidelines"]
+            if not any(text in line for text in ("LATEST versions", "pip install", "ALL models",
+                                                 "Unknown Models are Valid", "NO Compatibility Speculation",
+                                                 "Execution time:"))]
+        prompt["Instructions"]["Mac replay review"] = mac_replay_guidance(agent) + [
+            "Treat incompatible MPS operations, CPU training fallback, float64 tensors on MPS and "
+            "multiprocessing DataLoader workers as execution bugs. Repair them without changing the "
+            "model, training objective, fixed split or seed. Never add packages during the run."
+        ]
+    elif "Implementation guideline" in prompt["Instructions"]:
         prompt["Instructions"]["Implementation guideline"].extend(internet_clarification)
     else:
         prompt["Instructions"]["⚠️ Internet Access Clarification"] = internet_clarification

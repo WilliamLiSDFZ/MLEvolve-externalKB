@@ -140,13 +140,13 @@ def copy_inputs(source, arm_dir, cfg, snapshot, input_dir):
         from utils import preproc_data
         preproc_data(workspace / "input")
     replacements = sorted({
-        str(cfg.workspace_dir): str(workspace),
-        str(source / "workspace"): str(workspace),
-        str(cfg.log_dir): str(arm_dir / "logs"),
-        str(source / "logs"): str(arm_dir / "logs"),
-        str(cfg.data_dir): str(workspace / "input"),
-        str(input_dir): str(workspace / "input"),
-    }.items(), key=lambda item: -len(item[0]))
+                              str(cfg.workspace_dir): str(workspace),
+                              str(source / "workspace"): str(workspace),
+                              str(cfg.log_dir): str(arm_dir / "logs"),
+                              str(source / "logs"): str(arm_dir / "logs"),
+                              str(cfg.data_dir): str(workspace / "input"),
+                              str(input_dir): str(workspace / "input"),
+                          }.items(), key=lambda item: -len(item[0]))
     snapshot = rewrite_paths(snapshot, replacements)
     cfg.coldstart.description = rewrite_paths(cfg.coldstart.description, replacements)
     memory = source / "workspace/global_memory/records.json"
@@ -159,7 +159,8 @@ def copy_inputs(source, arm_dir, cfg, snapshot, input_dir):
     if cfg.candidate_runtime.enabled:
         contract = source / "workspace/candidate_results/contract"
         if not contract.is_dir():
-            raise FileNotFoundError("Source candidate_results/contract is required to preserve the exact validation split")
+            raise FileNotFoundError(
+                "Source candidate_results/contract is required to preserve the exact validation split")
         shutil.copytree(contract, workspace / "candidate_results/contract")
         manifest = json.loads((contract / "manifest.json").read_text())
         for split in ("train", "test"):
@@ -305,6 +306,22 @@ def execute_one(agent, parent, injection_text):
 
 
 def run(args):
+    profile = getattr(args, "profile", None)
+    if profile is None:
+        if any(getattr(args, key, None) for key in ("prepared_baseline", "dataset_dir", "output_root")):
+            raise ValueError("--prepared-baseline, --dataset-dir and --output-root require --profile mac-mps")
+        return _run(args)
+    if profile != "mac-mps":
+        raise ValueError(f"Unknown replay profile: {profile}")
+    if not getattr(args, "prepared_baseline", None):
+        raise ValueError("mac-mps requires --prepared-baseline from a completed manual calibration")
+    from utils.replay_macos.runtime import require_mps, mac_process_environment
+    environment = require_mps()
+    with mac_process_environment():
+        return _run(args, environment)
+
+
+def _run(args, environment=None):
     from omegaconf import OmegaConf
     from utils.replay_state import snapshot_journal, load_snapshot, restore_agent
 
@@ -327,6 +344,23 @@ def run(args):
     seed = args.seed if args.seed is not None else int(cfg.agent.seed)
     budget = remaining_budget(cfg, snapshot)
     cfg.exec.timeout = min(int(cfg.exec.timeout), budget)
+    baseline = baseline_node = None
+    private_dataset_dir = None
+    output_root = getattr(args, "output_root", None) or runs_root
+    original_metric = snapshot["nodes"][-1]["metric"]["value"]
+    if environment is not None:
+        from utils.replay_macos.runtime import apply_profile, ensure_separate, load_baseline, source_identity, \
+            verify_public_inputs
+        baseline_dir = args.prepared_baseline.expanduser().resolve()
+        baseline, baseline_node = load_baseline(baseline_dir, source_identity(source, snapshot, budget), environment)
+        verify_public_inputs(input_dir, source / "workspace/candidate_results/contract")
+        private_dataset_dir = apply_profile(cfg,
+                                            getattr(args, "dataset_dir", None) or baseline.get("private_dataset_dir"))
+        output_root = getattr(args, "output_root", None) or ROOT / "runs_mac_mps"
+        if output_root.expanduser().resolve() == runs_root:
+            raise ValueError("Mac replay output must use a separate --output-root")
+        ensure_separate(output_root.expanduser() / ("replay_" + component(args.experiment_id)),
+                        source, input_dir, baseline_dir)
     common_cfg = json.loads(json.dumps(OmegaConf.to_container(cfg, resolve=True), default=str))
     for role in ("code", "feedback"):
         common_cfg["agent"][role]["api_key"] = "[from job environment]"
@@ -337,14 +371,28 @@ def run(args):
                     corpus_manifest_sha256=file_hash(corpus_manifest) if corpus_manifest else None,
                     input_dir=str(input_dir), seed=seed, injection_char_limit=REPORT_CHARS,
                     replay_budget_seconds=budget, config=common_cfg)
-    arm_dir = prepare_arm(runs_root, source, args.experiment_id, args.arm, identity)
+    if baseline is not None:
+        identity.update(profile="mac-mps", environment=environment,
+                        original_parent_id=args.parent_node_id, effective_parent_id=baseline_node["id"],
+                        baseline_sha256=file_hash(baseline_dir / "baseline.json"),
+                        adapter_version=baseline["adapter_version"], private_dataset_dir=private_dataset_dir)
+    arm_dir = prepare_arm(output_root.expanduser(), source, args.experiment_id, args.arm, identity)
     result = dict(experiment_id=args.experiment_id, arm=args.arm, source_run=args.source_run,
                   parent_node_id=args.parent_node_id, seed=seed, status="preparing")
+    if baseline is not None:
+        result.update(profile="mac-mps", original_parent_id=args.parent_node_id, parent_node_id=baseline_node["id"],
+                      effective_parent_id=baseline_node["id"], original_parent_metric=original_metric,
+                      baseline_sha256=identity["baseline_sha256"])
     write_json(arm_dir / "result.json", result)
     interpreter = None
     try:
         isolate_caches(arm_dir)
         snapshot = copy_inputs(source, arm_dir, cfg, snapshot, input_dir)
+        if baseline is not None:
+            from utils.replay_macos.runtime import attach_baseline
+            snapshot = attach_baseline(snapshot, baseline_dir, baseline_node, arm_dir)
+            write_json(cfg.log_dir / "replay_environment.json", environment)
+            shutil.copy2(baseline_dir / "baseline.json", arm_dir / "source/mac_baseline.json")
         write_json(cfg.log_dir / "restored_journal.json", snapshot)
         OmegaConf.save(cfg, cfg.log_dir / "config.yaml")
         from utils.logging_config import setup_logging
@@ -373,7 +421,16 @@ def run(args):
         set_global_seed(seed)
         agent = AgentSearch(desc, cfg, Journal(), metric_maximize=parent.metric.maximize,
                             task_desc_is_clean=True)
-        restore_agent(agent, journal, args.parent_node_id)
+        restore_agent(agent, journal, parent.id)
+        if baseline is not None:
+            agent.replay_profile = "mac-mps"
+            agent.replay_environment = environment
+            agent.replay_original_parent_id = args.parent_node_id
+            agent.replay_baseline_id = parent.id
+            # Source GPU measurements remain history, not local MPS ranking candidates.
+            agent.top_candidates = [parent]
+            agent.best_node, agent.best_metric = parent, parent.metric.value
+            parent.local_best_node = parent
         if cfg.agent.use_global_memory and agent.global_memory is None:
             raise RuntimeError("Configured global memory could not be restored")
         if cfg.agent.use_global_memory:
@@ -421,14 +478,18 @@ def run(args):
         submission = cfg.workspace_dir / "submission" / f"submission_{child.id}.csv"
         if child.best_snapshot_id:
             submission = cfg.workspace_dir / "candidate_results/candidates" / child.id / "snapshots" / child.best_snapshot_id / "submission.csv"
+        if baseline is not None and private_dataset_dir is None:
+            evaluation = {"status": "unavailable", "reason": "No local private --dataset-dir configured"}
+        else:
+            evaluation = (private_score(cfg, submission)
+                          if child.is_valid or child.artifact_status == "scoreable"
+                          else {"status": "unavailable", "reason": "Child is not scoreable"})
         result.update(status="completed", child_node_id=child.id, parent_metric=parent.metric.value,
                       metric=child.metric.value, maximize=parent.metric.maximize,
                       is_buggy=child.is_buggy, is_valid=child.is_valid,
                       execution_status=child.execution_status, artifact_status=child.artifact_status,
                       submission=str(submission) if submission.is_file() else None,
-                      private_evaluation=(private_score(cfg, submission)
-                          if child.is_valid or child.artifact_status == "scoreable"
-                          else {"status": "unavailable", "reason": "Child is not scoreable"}))
+                      private_evaluation=evaluation)
         return result
     except BaseException as exc:
         result.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -449,9 +510,16 @@ def main():
     parser.add_argument("--corpus", type=Path, help="Paper corpus directory, shared by all four jobs")
     parser.add_argument("--data-dir", type=Path, help="Fallback/override prepared public data directory")
     parser.add_argument("--seed", type=int, help="Treatment/generation seed; defaults to source seed")
+    parser.add_argument("--profile", choices=["mac-mps"],
+                        help="Explicit Mac opt-in; omission preserves the original cluster path")
+    parser.add_argument("--output-root", type=Path, help="Mac-only output root; defaults to runs_mac_mps")
+    parser.add_argument("--prepared-baseline", type=Path, help="Completed Mac calibration directory")
+    parser.add_argument("--dataset-dir", type=Path, help="Mac-only local MLE-bench root for optional private grading")
     args = parser.parse_args()
+
     def terminate(signum, frame):
         raise SystemExit(128 + signum)
+
     signal.signal(signal.SIGTERM, terminate)
     result = run(args)
     print(json.dumps(result, ensure_ascii=False, indent=2))

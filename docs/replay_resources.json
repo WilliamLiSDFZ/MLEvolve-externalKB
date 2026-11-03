@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-03",
+  "purpose": "Static inventory of local Mac replay resources; not a runtime configuration.",
+  "path_base": "user_home",
+  "path_convention": "All path and paths values are relative to the current user's home directory. File-map keys are relative to their containing resource directory.",
+  "datasets": {
+    "jubias-public": {
+      "task_id": "jigsaw-unintended-bias-in-toxicity-classification",
+      "paths": [
+        "nautilus/replay-inputs/s68/runs/20260914_071735_jubias-base-gpt56sol-s60/workspace/input",
+        "nautilus/replay-inputs/jubias-f327226c/runs/20260912_081234_jubias-base-gpt56sol-s57/workspace/input"
+      ],
+      "copies_identical": true,
+      "bytes_per_copy": 847325974,
+      "files_sha256": {
+        "description.md": "b594ee8a61dae656195c34aa9f8c15aaa4eaee4bbd1fc676321684a07fda1951",
+        "sample_submission.csv": "8f8536c833aee335a7d38ea06de751813f2e2968caa175f61cc04f2f6d3551e9",
+        "test.csv": "a5884bbea83bb0126a2ef1cf45fcb60c01a6d664fa800affd91abdaae7d28be1",
+        "train.csv": "9bc510519bb010a46c343d9733f9abfb33d31127d7fc08d72237cdfcb7a982be"
+      }
+    },
+    "jubias-private": {
+      "path": "nautilus/replay-inputs/s68/mlebench/jigsaw-unintended-bias-in-toxicity-classification/prepared/private",
+      "files_sha256": {
+        "test.csv": "f25e352c8b9d2403bd614b7972e6ab5408a63adcea35e3230f17ca24e2b8004f"
+      },
+      "used_by_recorded_replays": false
+    }
+  },
+  "corpora": {
+    "paper-corpus-5cd1d5e7afd0": {
+      "path": "nautilus/replay-inputs/s68/paper_corpus",
+      "paper_count": 38273,
+      "records_sha1": "5cd1d5e7afd0",
+      "files_sha256": {
+        "manifest.json": "1de53b9492d3d125c1eee424a3977f421518bc9f1362969792c0b74765b77eb2",
+        "records.jsonl": "7bf47e853268e6254c5b111685aa880996e4385741e4f20d19987d612b4cd2e6"
+      }
+    },
+    "kb-working-corpus-35d01b8b78ae": {
+      "path": "Documents/project/python/Agentic_Knowledge_Base/output/paper_corpus",
+      "paper_count": 12800,
+      "records_sha1": "35d01b8b78ae",
+      "manifest_sha256": "aa042b1069e427dbad89dbb67e6dd84fda1ad8a3f8f9d00da29c69e3671dee00",
+      "used_by_recorded_replays": false
+    }
+  },
+  "sources": {
+    "20260914_071735_jubias-base-gpt56sol-s60": {
+      "path": "nautilus/replay-inputs/s68/runs/20260914_071735_jubias-base-gpt56sol-s60",
+      "contents": "Partial replay recovery artifacts, public inputs, contract and selected snapshot prefix; not a full original run.",
+      "checkpoint_weights_included": false,
+      "contract_seed": 60,
+      "contract_id": "18ff943a37017b47350e08e5793376e6c132f321665b3c68036d3982a9afd10f",
+      "contract_manifest_sha256": "032b6ea3529aaf35067730c027a54ad648334de1c4d88d0923cab298bc7a1fd7",
+      "download_manifest": {
+        "path": "nautilus/replay-inputs/s68/download_manifest.json",
+        "sha256": "04938ba130bed019797ab096f3593ffa22cd7367a608ba45d2e3da191b5a30de",
+        "files_base_path": "nautilus/replay-inputs/s68",
+        "verified_file_count": 110
+      }
+    },
+    "20260912_081234_jubias-base-gpt56sol-s57": {
+      "path": "nautilus/replay-inputs/jubias-f327226c/runs/20260912_081234_jubias-base-gpt56sol-s57",
+      "contents": "Partial replay recovery artifacts, public inputs, contract and selected snapshot prefix; not a full original run.",
+      "checkpoint_weights_included": false,
+      "contract_seed": 57,
+      "contract_id": "6c80bc6e2355b94af10b8fce53d1794658cf2eb0d607595b05c6b34a3ab923b8",
+      "contract_manifest_sha256": "5f327545cfc33f3ccdd30a3c29404c9b13a73fb37b3920c968cbc876f16d95ef",
+      "download_manifest": {
+        "path": "nautilus/replay-inputs/jubias-f327226c/download_manifest.json",
+        "sha256": "5f2841deec5ebc6c396b7bf976307cb2c55e941449bc6ba3a43e4f6796bc44cf",
+        "files_base_path": "nautilus/replay-inputs/jubias-f327226c/runs/20260912_081234_jubias-base-gpt56sol-s57",
+        "verified_file_count": 100
+      },
+      "selection": {
+        "path": "nautilus/replay-inputs/jubias-f327226c/selection.json",
+        "sha256": "6fa4343c759f28bac23fa85ed3ca2f68315b21fa57e2c58b4cb48a3fd5e0b59c",
+        "inventory_path": "nautilus/replay-inputs/jubias-f327226c/candidate_inventory.jsonl",
+        "inventory_sha256": "42c704e61cd1f25728e4ac03b23fe1abf1274ca8752f3cea14fcf57429d79e12"
+      }
+    }
+  },
+  "bundles": {
+    "jubias-36845c7c": {
+      "source_run": "20260914_071735_jubias-base-gpt56sol-s60",
+      "parent_node_id": "36845c7c3f1c4beca8eebc7a37852e7c",
+      "original_source_sha256": "e5f0ab92a8932140f472ab3d13e4139d14dde3dfa5d9b721570470022078fcec",
+      "adapter_version": "jigsaw-parent5-mps-v1",
+      "adapted_source_sha256": "a886b017cbe3300004136b203219b7de2f09b2bbfe43dee0860b166b756d1120",
+      "dataset": "jubias-public",
+      "corpus": "paper-corpus-5cd1d5e7afd0",
+      "baseline": "jubias-parent5-s68-torch2141"
+    },
+    "jubias-f327226c": {
+      "source_run": "20260912_081234_jubias-base-gpt56sol-s57",
+      "parent_node_id": "f327226c666446d58718f3801048032c",
+      "original_source_sha256": "626b762e35a3aa5e023c56002a1198a1a0d73c2bbdd8b689dcf7739f9541556e",
+      "adapter_version": "jigsaw-f327226c-mps-v1",
+      "adapted_source_sha256": "13178cd664223bd5d240a051d37501e9589bbce7079d1be0a43c2908c03a3499",
+      "dataset": "jubias-public",
+      "corpus": "paper-corpus-5cd1d5e7afd0",
+      "baseline": "jubias-f327226c-torch2141",
+      "existing_launcher_path": "nautilus/replay-inputs/jubias-f327226c/run_seed.sh"
+    }
+  },
+  "baselines": {
+    "jubias-parent5-s68-torch2141": {
+      "path": "Documents/project/python/MLEvolve/mac_baselines/jubias-parent5-s68-torch2141",
+      "status": "completed",
+      "manifest_sha256": "ce3ec5b934eabe14d2417935429a935c254e15f3fd81d07ba03c9659df4de97d",
+      "effective_parent_id": "21240c53e45e44e1a44102fa6b8292e0",
+      "metric": 0.8932941036181199
+    },
+    "jubias-f327226c-torch2141": {
+      "path": "Documents/project/python/MLEvolve/mac_baselines/jubias-f327226c-torch2141",
+      "status": "completed",
+      "manifest_sha256": "c0fd602e07d4e3b8c631a01c7aa5d73db2e743d0e6ea8777afcdf905cb9c4d47",
+      "effective_parent_id": "4de73c6ade254c26a4cc6a18a4f7c1a1",
+      "metric": 0.8949928373841353
+    },
+    "jubias-parent5-s68": {
+      "path": "Documents/project/python/MLEvolve/mac_baselines/jubias-parent5-s68",
+      "status": "failed",
+      "manifest_sha256": "a968ddd6cabe0d29707ad150e5f60cec0a442ed3e6225612fdc00f44a189dcd6",
+      "purpose": "Retained failed calibration for diagnosis; not a replay baseline."
+    }
+  },
+  "experiments": [
+    {
+      "id": "jubias-noise-parent5-mac-s67",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-noise-parent5-mac-s67",
+      "bundle": "jubias-36845c7c",
+      "seed": 67,
+      "completed_arms": ["A", "B", "C", "D"]
+    },
+    {
+      "id": "jubias-noise-parent5-mac-s68",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-noise-parent5-mac-s68",
+      "bundle": "jubias-36845c7c",
+      "seed": 68,
+      "completed_arms": ["A", "B", "C", "D"]
+    },
+    {
+      "id": "jubias-noise-parent5-mac-s69",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-noise-parent5-mac-s69",
+      "bundle": "jubias-36845c7c",
+      "seed": 69,
+      "completed_arms": ["A", "B", "C", "D"]
+    },
+    {
+      "id": "jubias-f327226c-mac-s67",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-f327226c-mac-s67",
+      "bundle": "jubias-f327226c",
+      "seed": 67,
+      "completed_arms": ["A", "B", "C", "D"]
+    },
+    {
+      "id": "jubias-f327226c-mac-s68",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-f327226c-mac-s68",
+      "bundle": "jubias-f327226c",
+      "seed": 68,
+      "completed_arms": ["A", "B", "C", "D"]
+    },
+    {
+      "id": "jubias-f327226c-mac-s69",
+      "path": "Documents/project/python/MLEvolve/runs_mac_mps/replay_jubias-f327226c-mac-s69",
+      "bundle": "jubias-f327226c",
+      "seed": 69,
+      "completed_arms": ["A", "B", "C", "D"]
+    }
+  ],
+  "verification": {
+    "download_manifest_files": "All 210 entries matched size and SHA256.",
+    "public_inputs": "Both copies matched all four file hashes.",
+    "experiments": "Six experiment identities matched their source, baseline and corpus; 24 result.json files reported completed.",
+    "scope": "Read-only inventory checks; no new training, scoring, full checkpoint audit or physical disk-space accounting."
+  }
+}

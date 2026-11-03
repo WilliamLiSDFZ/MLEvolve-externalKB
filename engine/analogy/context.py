@@ -307,6 +307,7 @@ def resource_context(agent, stage):
     budget_key = "draft_budget_seconds" if stage in {"draft", "fusion_draft"} else "candidate_budget_seconds"
     configured_cap = _get(runtime, budget_key) if runtime_on else None
     configured_cap = configured_cap or _get(_get(cfg, "exec"), "timeout")
+    mac_replay = getattr(agent, "replay_profile", None) == "mac-mps"
     result = {"sampled_at_unix": now, "run_deadline_unix": deadline,
               "run_remaining_seconds": max(0, deadline - now) if deadline is not None else None,
               "deadline_source": deadline_source if deadline is not None else "unavailable",
@@ -316,11 +317,27 @@ def resource_context(agent, stage):
               "queued_candidates": len(_get(executor, "_slot_waiters", [])) if executor is not None else None,
               "execution_slots": _get(executor, "max_parallel_run"),
               "visible_gpu_ids": list(_get(executor, "gpu_devices", []) or []) if executor is not None else None,
-              "visible_gpu_properties": _get(executor, "gpu_properties", None) or _gpu_observations(executor),
+              "visible_gpu_properties": (None if mac_replay else
+                  _get(executor, "gpu_properties", None) or _gpu_observations(executor)),
               "compiler_commands_available": {name: shutil.which(name) is not None for name in ("gcc", "g++", "nvcc")},
               "future_candidate_gpu": "inherits the parent's CUDA_VISIBLE_DEVICES; shared with other active candidates",
               "actual_candidate_budget": "determined after queue wait: min(stage cap, execution timeout, remaining run time)",
               "offline_models": "see offline model section; no availability inferred from model names in plans"}
+    if mac_replay:
+        environment = getattr(agent, "replay_environment", {})
+        result.update(
+            visible_gpu_ids=[],
+            visible_gpu_properties={"status": "observed", "backend": "mps", "source": "Mac replay preflight",
+                                    "unified_memory_bytes": environment.get("memory_bytes"),
+                                    "memory_scope": "shared by CPU, GPU and macOS; not dedicated VRAM"},
+            future_candidate_gpu="MPS on the local Mac; candidate training must not silently fall back to CPU",
+            replay_environment=environment,
+            replay_original_parent_id=getattr(agent, "replay_original_parent_id", None),
+            replay_baseline_id=getattr(agent, "replay_baseline_id", None),
+            replay_measurement_scope=("Source GPU history retains its original measurements. The current Mac parent "
+                "baseline is measured separately; compare child results against that baseline. Do not interpret "
+                "historical GPU timings or scores as measurements of this Mac."),
+        )
     return result
 
 
@@ -391,6 +408,10 @@ def packet_from_search(agent, parent_node, *, code_session=None, runtime_facts=N
                "artifact_status": _get(parent_node, "artifact_status"), "best_snapshot_id": _get(parent_node, "best_snapshot_id"),
                "exception_type": _get(parent_node, "exc_type"),
                "source_tool_allowed_node_ids": [item["node_id"] for item in code_session.allowed_nodes()], "scope": "already-executed parent being improved, not the future child"}
+    if getattr(agent, "replay_profile", None) == "mac-mps":
+        current.update(measurement_origin="Mac MPS baseline", branch_best=current_metric,
+                       branch_best_scope="Mac baseline only; source GPU metrics are excluded",
+                       original_parent_id=getattr(agent, "replay_original_parent_id", None))
     raw_log = _get(parent_node, "_term_out", "")
     log, cleanup = clean_execution_output(raw_log)
     attempts = []
@@ -411,6 +432,9 @@ def packet_from_search(agent, parent_node, *, code_session=None, runtime_facts=N
         trajectory.append({"node_id": _get(node, "id"), "parent_id": _get(_get(node, "parent"), "id"),
                            "stage": _get(node, "stage"), "is_buggy": _get(node, "is_buggy"),
                            "metric": _metric(node), "plan_intent": clip(describe_plan(_get(node, "plan")), options.trajectory_plan_chars)})
+        if getattr(agent, "replay_profile", None) == "mac-mps":
+            trajectory[-1]["measurement_origin"] = ("Mac MPS baseline"
+                if _get(node, "id") == getattr(agent, "replay_baseline_id", None) else "source GPU history")
     resources = resource_context(agent, "improve")
     pretrained = _get(agent, "coldstart_description", "") or ""
     runtime_text, visible_runtime, runtime_omitted = _runtime_text(runtime_facts, options.runtime_chars)
