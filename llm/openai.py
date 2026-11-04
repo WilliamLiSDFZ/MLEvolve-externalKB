@@ -152,7 +152,9 @@ def query(
                     import jsonschema
                     jsonschema.validate(output, func_spec.json_schema)
                 except Exception as exc:
-                    raise ResponsesError("Invalid structured function arguments", category="invalid_output") from exc
+                    error = ResponsesError("Invalid structured function arguments", category="invalid_output")
+                    error.raw_output = calls[0]["arguments"]
+                    raise error from exc
             elapsed = time.monotonic() - t0
             info = response_info(response, requested_model=model, reasoning_effort=effort)
             info["role"] = resolved_role
@@ -335,7 +337,9 @@ def generate(
                     import jsonschema
                     jsonschema.validate(json.loads(full_text), json_schema)
                 except Exception as exc:
-                    raise ResponsesError("Invalid generated structured JSON", category="invalid_output") from exc
+                    error = ResponsesError("Invalid generated structured JSON", category="invalid_output")
+                    error.raw_output = full_text
+                    raise error from exc
             # Responses has no stop parameter; preserve callers' stop semantics
             # locally only after a fully completed response has been received.
             if stop_tokens and json_schema is None:

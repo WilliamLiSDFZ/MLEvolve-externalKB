@@ -15,7 +15,8 @@ from agents.prompts import (
     get_internet_clarification,
     get_impl_guideline_from_agent,
 )
-from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix, build_chat_prompt_for_model
+from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, \
+    build_planner_suffix, build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from agents.analogy_handoff import (
@@ -42,7 +43,7 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
     """
     acfg = getattr(getattr(agent, "cfg", None), "analogy", None)
     if acfg is not None and not getattr(acfg, "improve", True):
-        return ""            # arm E: the agent runs on the first draft only
+        return ""  # arm E: the agent runs on the first draft only
     try:
         from engine.analogy.agent import retrieve_for_node
         from engine.analogy.context import context_options
@@ -84,15 +85,15 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
     }
     if report_from_prompt(prompt) is not None:
         prompt["Instructions"]["Explicit analogy selection"] = (
-            "Record a single selected_mechanism_id (one offered ID, or null to reject all), "
-            "analogy_decision_reason and analogy_adaptation in the structured plan. "
-            "For a natural-language full rewrite, put one JSON object on a line beginning "
-            "ANALOGY_ADOPTION: before the outline and Python code. Missing or ambiguous selection "
-            "is recorded as unknown. A declaration is not proof that the mechanism was implemented "
-            "or that it caused a score change."
-            " Offered mechanism IDs: " + ", ".join(
-                str(m.get("mechanism_id")) for m in report_from_prompt(prompt).get("mechanisms", [])
-                if isinstance(m, dict))
+                "Record a single selected_mechanism_id (one offered ID, or null to reject all), "
+                "analogy_decision_reason and analogy_adaptation in the structured plan. "
+                "For a natural-language full rewrite, put one JSON object on a line beginning "
+                "ANALOGY_ADOPTION: before the outline and Python code. Missing or ambiguous selection "
+                "is recorded as unknown. A declaration is not proof that the mechanism was implemented "
+                "or that it caused a score change."
+                " Offered mechanism IDs: " + ", ".join(
+            str(m.get("mechanism_id")) for m in report_from_prompt(prompt).get("mechanisms", [])
+            if isinstance(m, dict))
         )
     logger.info("[improve] node %s: injected %d chars of analogy suggestions",
                 parent_node.id, len(text))
@@ -101,6 +102,12 @@ def _inject_analogy(agent, prompt: Any, parent_node: SearchNode) -> str:
 
 def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) -> SearchNode:
     """Improve once; explicit replay text (including empty text) bypasses retrieval."""
+    material = getattr(agent, "replay_material", None)
+    if material is not None:
+        if not agent.acfg.use_diff_mode:
+            raise ValueError("Material protocol v2 requires diff mode")
+        if injection_text != material.text:
+            raise ValueError("Replay injection differs from the frozen material")
     improvement_standards = (
         "🎯 As a Grandmaster, make MEANINGFUL improvements that boost leaderboard performance.\n\n"
         "**Acceptable**: Advanced architectures, ensemble techniques, feature engineering, hyperparameter optimization, improved pipelines.\n"
@@ -108,11 +115,11 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
     )
 
     introduction = (
-        improvement_standards +
-        "You are provided with a previously developed solution below and should improve it "
-        "in order to further increase the (test time) performance. "
-        "For this you should first outline a brief plan in natural language for how the solution can be improved and "
-        "then implement this improvement in Python based on the provided previous solution."
+            improvement_standards +
+            "You are provided with a previously developed solution below and should improve it "
+            "in order to further increase the (test time) performance. "
+            "For this you should first outline a brief plan in natural language for how the solution can be improved and "
+            "then implement this improvement in Python based on the provided previous solution."
     )
 
     prompt: Any = {
@@ -134,7 +141,7 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
         analogy_report = _inject_analogy(agent, prompt, parent_node)
     else:
         analogy_report = injection_text
-        if injection_text:
+        if injection_text and material is None:
             prompt["Instructions"]["Supplementary material"] = [
                 "Use the following material only if it helps improve the current solution. "
                 "Ignore it if it is not useful for this task. If you use it, explain what you "
@@ -156,7 +163,8 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
             trigger_reason.append(f"success_patience={success_patience}>=2")
         if total_patience >= 5:
             trigger_reason.append(f"total_patience={total_patience}>=5")
-        logger.warning(f"🔥 PLATEAU DETECTED! Triggered by: {' AND '.join(trigger_reason)}, using Magnitude-Based prompt")
+        logger.warning(
+            f"🔥 PLATEAU DETECTED! Triggered by: {' AND '.join(trigger_reason)}, using Magnitude-Based prompt")
         if branch_best_score is None:
             best_score_str = "N/A (no successful nodes yet)"
         else:
@@ -345,7 +353,7 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
             plan, code = _diff_improve(agent, prompt, agent.data_preview, parent_node)
             generation_mode = "diff"
         except Exception as e:
-            if getattr(e, "transport_retry_exhausted", False):
+            if material is not None or getattr(e, "transport_retry_exhausted", False):
                 raise
             logger.warning(f"Diff improve failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -355,8 +363,8 @@ def run(agent, parent_node: SearchNode, *, injection_text: str | None = None) ->
     from_topk = getattr(parent_node, '_topk_triggered', False)
 
     new_node = SearchNode(plan=plan, code=code, parent=parent_node, stage="improve",
-                        local_best_node=parent_node.local_best_node, from_topk=from_topk,
-                        analogy_report=analogy_report or None)
+                          local_best_node=parent_node.local_best_node, from_topk=from_topk,
+                          analogy_report=analogy_report or None)
     record_child_handoff(agent, new_node, prompt, generation_mode=generation_mode)
     register_node(agent, new_node, prompt_complete, parent_node=parent_node)
 
@@ -386,7 +394,6 @@ _IMPROVE_DIFF_INTRODUCTION = (
     "the solution's test set performance."
 )
 
-
 _IMPROVE_SUFFIX_EXTRA = (
     "Building on the current solution, I'll develop an improved approach "
     "that addresses identified limitations while preserving what works well."
@@ -398,15 +405,16 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
         "stage": "improve",
         "memory": prompt_base["Memory"],
         "previous_code": parent_node.code,
-        "previous_code_summary": parent_node.code_summary if hasattr(parent_node, 'code_summary') and parent_node.code_summary else None,
+        "previous_code_summary": parent_node.code_summary if hasattr(parent_node,
+                                                                     'code_summary') and parent_node.code_summary else None,
         "execution_output": parent_node.term_out if hasattr(parent_node, 'term_out') else "",
         "parent_node": parent_node,
     }
 
     use_memory = (
-        getattr(agent.acfg, 'use_global_memory', False)
-        and agent.global_memory is not None
-        and len(agent.global_memory.records) > 0
+            getattr(agent.acfg, 'use_global_memory', False)
+            and agent.global_memory is not None
+            and len(agent.global_memory.records) > 0
     )
 
     if use_memory:
@@ -434,10 +442,14 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
     if not modules and plans:
         planning_result['module'] = list(plans.keys())
 
+    material = getattr(agent, "replay_material", None)
+    if material is not None:
+        material.accept_plan(planning_result)
+
     adoption = adoption_from_plan(prompt_base, planning_result)
     if adoption is not None:
         planning_result["analogy_adoption"] = {key: value for key, value in adoption.items()
-                                                if key != "selected_mechanism"}
+                                               if key != "selected_mechanism"}
     return diff_generate_and_apply(
         agent_instance=agent,
         planning_result=planning_result,

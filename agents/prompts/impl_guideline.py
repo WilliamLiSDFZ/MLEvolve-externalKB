@@ -9,6 +9,8 @@ import humanize
 def mac_replay_guidance(agent):
     """Shared generation/review constraints for the explicitly selected Mac replay."""
     environment = getattr(agent, "replay_environment", {})
+    objective = ("task and evaluation metric" if getattr(agent, "replay_material", None) is not None
+                 else "objective")
     return [
         "**Mac replay execution profile: mac-mps**",
         "Train and predict on torch.device('mps') with float32 model weights and floating-point tensors. "
@@ -19,7 +21,7 @@ def mac_replay_guidance(agent):
         "Do not construct or move sparse COO/CSR tensors on MPS, or densify the full feature matrix.",
         "Use DataLoader(num_workers=0); omit prefetch_factor and disable persistent_workers. "
         "Keep script execution under if __name__ == '__main__' when introducing subprocesses.",
-        "Preserve the replay validation split, training seed, objective and execution budget. "
+        f"Preserve the replay validation split, training seed, {objective} and execution budget. "
         "Historical GPU timings/scores are source evidence, not measurements of this Mac; "
         "evaluate the child against the separately measured Mac parent baseline.",
         "Installed package versions from the Mac preflight (do not assume availability for missing/unknown entries): "

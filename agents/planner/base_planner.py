@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import json
 import logging
+from functools import partial
 from typing import Dict, Any, Union
 
 from llm import generate, compile_prompt_to_md
@@ -280,6 +281,7 @@ def run_planner(
     max_retries: int = 3,
     stage_name: str = "Planning",
 ) -> Dict[str, Any]:
+    material = getattr(agent_instance, "replay_material", None)
     component_descriptions = get_component_descriptions()
     component_desc_parts = [f"- **{name}**: {desc}" for name, desc in component_descriptions.items()]
     component_desc_text = "\n".join(component_desc_parts)
@@ -333,6 +335,8 @@ def run_planner(
     ])
     user_prompt = "".join(user_prompt_parts)
     user_prompt += planning_instruction(prompt_base)
+    if material is not None:
+        user_prompt += material.section("planner_direct")
 
     model_name = agent_instance.acfg.code.model.lower()
     planning_prompt_complete = build_model_prompt(
@@ -343,12 +347,15 @@ def run_planner(
     )
 
     planning_result = None
+    generate_plan = generate if material is None else partial(material.call, "planner_direct", generate)
     for attempt in range(max_retries):
         logger.info(f"Calling {stage_name} Agent to analyze which modules to modify... (attempt {attempt + 1}/{max_retries})")
 
         json_schema = planning_schema(PLANNING_JSON_SCHEMA, prompt_base)
+        if material is not None:
+            json_schema = material.plan_schema(json_schema)
 
-        planning_response = generate(
+        planning_response = generate_plan(
             prompt=planning_prompt_complete,
             temperature=agent_instance.acfg.code.temp,
             cfg=agent_instance.cfg,
@@ -357,6 +364,16 @@ def run_planner(
 
         planning_result = parse_planning_response(planning_response)
         parse_success = planning_result.get("parse_success", True)
+
+        if material is not None:
+            try:
+                material.validate_plan(planning_result)
+            except ValueError as exc:
+                logger.warning("%s material decision attempt %s/%s: %s", stage_name, attempt + 1, max_retries, exc)
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Material planner failed after retries: {exc}") from exc
+                continue
+            return planning_result
 
         if not parse_success:
             logger.error(f"❌ {stage_name} attempt {attempt + 1}: JSON parsing failed")

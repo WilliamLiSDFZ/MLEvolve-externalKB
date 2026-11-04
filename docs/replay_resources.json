@@ -101,8 +101,7 @@
       "adapted_source_sha256": "13178cd664223bd5d240a051d37501e9589bbce7079d1be0a43c2908c03a3499",
       "dataset": "jubias-public",
       "corpus": "paper-corpus-5cd1d5e7afd0",
-      "baseline": "jubias-f327226c-torch2141",
-      "existing_launcher_path": "nautilus/replay-inputs/jubias-f327226c/run_seed.sh"
+      "baseline": "jubias-f327226c-torch2141"
     }
   },
   "baselines": {

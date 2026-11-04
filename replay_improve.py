@@ -307,6 +307,9 @@ def execute_one(agent, parent, injection_text):
 
 def run(args):
     profile = getattr(args, "profile", None)
+    material_protocol = getattr(args, "material_protocol", None)
+    if material_protocol is not None and (material_protocol != "v2" or profile != "mac-mps"):
+        raise ValueError("--material-protocol v2 requires --profile mac-mps")
     if profile is None:
         if any(getattr(args, key, None) for key in ("prepared_baseline", "dataset_dir", "output_root")):
             raise ValueError("--prepared-baseline, --dataset-dir and --output-root require --profile mac-mps")
@@ -330,6 +333,9 @@ def _run(args, environment=None):
     raw = json.loads((source / "logs/journal.json").read_text())
     snapshot = snapshot_journal(raw, args.parent_node_id)
     cfg = load_config(source / "logs/config.yaml")
+    material_protocol = getattr(args, "material_protocol", None)
+    if material_protocol is not None and (environment is None or not cfg.agent.use_diff_mode):
+        raise ValueError("Material protocol v2 requires mac-mps and diff mode")
     if args.corpus:
         cfg.analogy.corpus_path = str(args.corpus.expanduser().resolve())
     corpus_manifest = (Path(cfg.analogy.corpus_path) / "manifest.json") if cfg.analogy.corpus_path else None
@@ -376,15 +382,20 @@ def _run(args, environment=None):
                         original_parent_id=args.parent_node_id, effective_parent_id=baseline_node["id"],
                         baseline_sha256=file_hash(baseline_dir / "baseline.json"),
                         adapter_version=baseline["adapter_version"], private_dataset_dir=private_dataset_dir)
+    if material_protocol is not None:
+        identity["material_protocol"] = material_protocol
     arm_dir = prepare_arm(output_root.expanduser(), source, args.experiment_id, args.arm, identity)
     result = dict(experiment_id=args.experiment_id, arm=args.arm, source_run=args.source_run,
                   parent_node_id=args.parent_node_id, seed=seed, status="preparing")
+    if material_protocol is not None:
+        result["material_protocol"] = material_protocol
     if baseline is not None:
         result.update(profile="mac-mps", original_parent_id=args.parent_node_id, parent_node_id=baseline_node["id"],
                       effective_parent_id=baseline_node["id"], original_parent_metric=original_metric,
                       baseline_sha256=identity["baseline_sha256"])
     write_json(arm_dir / "result.json", result)
     interpreter = None
+    material = None
     try:
         isolate_caches(arm_dir)
         snapshot = copy_inputs(source, arm_dir, cfg, snapshot, input_dir)
@@ -464,6 +475,11 @@ def _run(args, environment=None):
         else:
             from utils.replay_inputs import prepare_input
             text, _, _ = prepare_input(args.arm, agent, parent, injection_dir, seed)
+        if material_protocol is not None:
+            from agents.replay_material import MaterialProtocol
+            material = MaterialProtocol(cfg.log_dir / "material_handoff", text, args.arm, parent.code)
+            agent.replay_material = material
+            result["material_handoff"] = "logs/material_handoff/audit.json"
         # Input generation must not consume a different improve/training budget in C/D.
         set_global_seed(seed)
         agent.start_time = time.time() - (cfg.agent.time_limit - budget)
@@ -493,8 +509,13 @@ def _run(args, environment=None):
         return result
     except BaseException as exc:
         result.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        if material is not None:
+            material.fail(exc)
         raise
     finally:
+        if material is not None:
+            result.update(material_decision=material.audit.get("material_decision"),
+                          material_review=material.audit.get("material_review"))
         if interpreter is not None:
             interpreter.cleanup_session(-1)
         write_json(arm_dir / "result.json", result)
@@ -512,6 +533,8 @@ def main():
     parser.add_argument("--seed", type=int, help="Treatment/generation seed; defaults to source seed")
     parser.add_argument("--profile", choices=["mac-mps"],
                         help="Explicit Mac opt-in; omission preserves the original cluster path")
+    parser.add_argument("--material-protocol", choices=["v2"],
+                        help="Mac diff replay only: full material delivery, explicit decisions and audit for all arms")
     parser.add_argument("--output-root", type=Path, help="Mac-only output root; defaults to runs_mac_mps")
     parser.add_argument("--prepared-baseline", type=Path, help="Completed Mac calibration directory")
     parser.add_argument("--dataset-dir", type=Path, help="Mac-only local MLE-bench root for optional private grading")

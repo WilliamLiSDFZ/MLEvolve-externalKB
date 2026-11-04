@@ -11,6 +11,7 @@ Used by improve_agent when global memory is available.
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import Dict, Any
 
 from llm import generate, compile_prompt_to_md
@@ -37,6 +38,7 @@ def generate_initial_plan(
     data_preview: str,
     context: Dict[str, Any],
 ) -> str:
+    material = getattr(agent_instance, "replay_material", None)
     initial_prompt_dict = prompt_base.copy()
 
     component_descriptions = get_component_descriptions()
@@ -76,6 +78,8 @@ def generate_initial_plan(
         f"{memory_section}\n\n"
         f"{instructions}\n"
     )
+    if material is not None:
+        user_prompt += material.section("planner_initial")
 
     assistant_suffix = (
         f"Okay! I will analyze the current solution and propose an improvement plan.\n"
@@ -94,7 +98,8 @@ def generate_initial_plan(
         assistant_suffix=assistant_suffix,
     )
 
-    planning_response = generate(
+    generate_plan = generate if material is None else partial(material.call, "planner_initial", generate)
+    planning_response = generate_plan(
         prompt=prompt_complete,
         temperature=agent_instance.acfg.code.temp,
         cfg=agent_instance.cfg,
@@ -115,6 +120,7 @@ def refine_plan_to_json(
     data_preview: str,
     context: Dict[str, Any],
 ) -> Dict[str, Any]:
+    material = getattr(agent_instance, "replay_material", None)
     query_text = initial_plan_text
 
     similar_success_records = agent_instance.global_memory.retrieve_similar_records(
@@ -141,8 +147,13 @@ def refine_plan_to_json(
 
     user_prompt = _build_refine_user_prompt(
         prompt_base, initial_plan_text, refinement_guidance, component_desc_text,
+        reconsider=material is not None,
     )
     user_prompt += planning_instruction(prompt_base, full_report=True)
+    if material is not None:
+        user_prompt += "\n# Implementation constraints\n" + compile_prompt_to_md(
+            {"Implementation guideline": prompt_base.get("Instructions", {}).get("Implementation guideline", [])}, 2)
+        user_prompt += material.section("planner_refine")
 
     if refinement_guidance:
         introduction = (
@@ -173,6 +184,19 @@ def refine_plan_to_json(
             f"I will convert it into specific module-level modifications."
         )
 
+    if material is not None:
+        introduction = (
+            "Refine the initial plan into structured JSON using the task, current code, execution evidence, "
+            "supplementary material and historical experiments. Reconsider its direction when the evidence "
+            "warrants it and explain the change in the reason field."
+        )
+        assistant_suffix = (
+            f"Dataset information:\n{data_preview}\n"
+            f"Current code:\n{prompt_base['Previous solution']['Code']}\n"
+            f"Execution results:\n{wrap_code(context.get('execution_output', ''), lang='')}\n"
+            "I will produce a justified final plan and an explicit material decision."
+        )
+
     model_name = agent_instance.acfg.code.model.lower()
     planning_prompt_complete = build_model_prompt(
         model_name=model_name,
@@ -182,18 +206,32 @@ def refine_plan_to_json(
     )
 
     json_schema = planning_schema(PLANNING_JSON_SCHEMA, prompt_base)
+    if material is not None:
+        json_schema = material.plan_schema(json_schema)
     max_retries = 3
     planning_result = None
+    generate_plan = generate if material is None else partial(material.call, "planner_refine", generate)
 
     for attempt in range(max_retries):
         logger.info(f"[RefinePlan] Calling LLM to generate JSON plan... (attempt {attempt + 1}/{max_retries})")
 
-        planning_response = generate(
+        planning_response = generate_plan(
             prompt=planning_prompt_complete,
             temperature=agent_instance.acfg.code.temp,
             cfg=agent_instance.cfg,
             json_schema=json_schema,
         )
+
+        if material is not None:
+            planning_result = parse_planning_response(planning_response)
+            try:
+                material.validate_plan(planning_result)
+            except ValueError as exc:
+                logger.warning("RefinePlan material decision attempt %s/%s: %s", attempt + 1, max_retries, exc)
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Material planner failed after retries: {exc}") from exc
+                continue
+            return planning_result
 
         if not planning_response or (isinstance(planning_response, str) and not planning_response.strip()):
             logger.warning(f"⚠️ RefinePlan attempt {attempt + 1}: Empty response from LLM")
@@ -301,6 +339,7 @@ def _build_refine_user_prompt(
     initial_plan_text: str,
     refinement_guidance: str,
     component_desc_text: str,
+    *, reconsider: bool = False,
 ) -> str:
     """Build the user prompt for the refine stage."""
     parts = [
@@ -330,7 +369,8 @@ def _build_refine_user_prompt(
             "**Key Points:**",
             "- Convert the initial plan into specific module-level modifications",
             "- **Reference similar historical experiments** above to optimize the plan (learn from what worked and avoid what failed)",
-            "- **DO NOT deviate** from the initial plan's core direction - use historical experiences to refine and enhance, not replace",
+            ("- Reconsider the initial direction when the current evidence warrants it; explain any change in reason"
+             if reconsider else "- **DO NOT deviate** from the initial plan's core direction - use historical experiences to refine and enhance, not replace"),
             "- Consider the task requirements, current code state, and execution results (provided in assistant message)",
             "",
             "**Requirements:**",
@@ -350,7 +390,8 @@ def _build_refine_user_prompt(
             "",
             "**Key Points:**",
             "- Convert the text plan into specific module-level modifications",
-            "- Follow the initial plan's direction closely",
+            ("- Reconsider the initial direction when the current evidence warrants it; explain any change in reason"
+             if reconsider else "- Follow the initial plan's direction closely"),
             "- Consider the task requirements, current code state, and execution results (provided in assistant message)",
             "",
             "**Requirements:**",

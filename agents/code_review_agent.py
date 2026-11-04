@@ -64,6 +64,12 @@ CODE_REVIEW_SPEC = FunctionSpec(
 
 def run(agent, node: SearchNode) -> str:
     logger.debug(f"[review] node {node.id}")
+    material = getattr(agent, "replay_material", None)
+
+    def finish(code):
+        if material is not None:
+            material.finish_review(code)
+        return code
 
     prompt = get_code_review_prompt(
         task_desc=agent.task_desc,
@@ -103,6 +109,12 @@ def run(agent, node: SearchNode) -> str:
     else:
         prompt["Instructions"]["⚠️ Internet Access Clarification"] = internet_clarification
 
+    review_spec = CODE_REVIEW_SPEC
+    if material is not None:
+        prompt["Instructions"]["Replay material handoff"] = material.section("review")
+        review_spec = FunctionSpec(name=CODE_REVIEW_SPEC.name, description=CODE_REVIEW_SPEC.description,
+                                   json_schema=material.review_schema(CODE_REVIEW_SPEC.json_schema))
+
     use_diff_for_review = agent.acfg.use_diff_mode
     max_retries = 3
 
@@ -112,17 +124,20 @@ def run(agent, node: SearchNode) -> str:
                 logger.info(f"Code review retry attempt {attempt + 1}/{max_retries} for node {node.id}")
                 time.sleep(5)
 
-            review_response = cast(
-                dict,
-                query(
-                    system_message=prompt,
-                    user_message=None,
-                    func_spec=CODE_REVIEW_SPEC,
-                    model=agent.acfg.code.model, role="code",
-                    temperature=agent.acfg.code.temp,
-                    cfg=agent.cfg
-                ),
-            )
+            kwargs = dict(system_message=prompt, user_message=None, func_spec=review_spec,
+                          model=agent.acfg.code.model, role="code",
+                          temperature=agent.acfg.code.temp, cfg=agent.cfg)
+            review_response = cast(dict, material.call("review", query, **kwargs) if material is not None
+                                   else query(**kwargs))
+            if material is not None:
+                if (not isinstance(review_response, dict) or
+                        not isinstance(review_response.get("needs_revision"), bool) or
+                        not isinstance(review_response.get("reasoning"), str) or
+                        not review_response["reasoning"].strip() or
+                        (review_response.get("revised_code") is not None and
+                         not isinstance(review_response["revised_code"], str))):
+                    raise ValueError("Invalid material protocol code-review response")
+                material.record_review(review_response, node.code)
 
             needs_revision = review_response.get("needs_revision", False)
             reasoning = review_response.get("reasoning", "")
@@ -141,27 +156,36 @@ def run(agent, node: SearchNode) -> str:
                             patched_code, count = patcher.apply_patch(
                                 revised_code, node.code, strict=False
                             )
+                            if material is not None:
+                                search = "<<<<<<< SEARCH" if "<<<<<<< SEARCH" in revised_code else "< SEARCH"
+                                end = ">>>>>>> REPLACE" if search == "<<<<<<< SEARCH" else "> REPLACE"
+                                if count != revised_code.count(search) or count != revised_code.count(end):
+                                    raise RuntimeError("Material protocol review diff did not apply completely")
                             if count > 0 and patched_code and patched_code != node.code:
                                 logger.info(f"Successfully applied {count} review patch(es)")
-                                return patched_code.strip()
+                                return finish(patched_code.strip())
+                            if material is not None:
+                                raise RuntimeError("Material protocol review diff made no code change")
                             logger.warning(
                                 f"Diff patch failed (count={count}), keeping original code to avoid writing raw diff to runfile"
                             )
-                            return node.code
+                            return finish(node.code)
                         except Exception as e:
-                            if getattr(e, "transport_retry_exhausted", False):
+                            if material is not None or getattr(e, "transport_retry_exhausted", False):
                                 raise
                             logger.warning(
                                 f"Failed to apply diff patch in code review: {e}, keeping original code to avoid writing raw diff to runfile"
                             )
-                            return node.code
+                            return finish(node.code)
                     else:
                         # Full code revision (original behavior)
                         if use_diff_for_review:
-                            return node.code
+                            if material is not None:
+                                raise RuntimeError("Material protocol review requires SEARCH/REPLACE fixes")
+                            return finish(node.code)
                         else:
                             logger.info("Using revised code from reviewer")
-                            return revised_code.strip()
+                            return finish(revised_code.strip())
 
                 if attempt < max_retries - 1:
                     logger.warning(f"Code review violation: needs_revision=True but revised_code is empty/None - Will retry ({attempt + 1}/{max_retries})")
@@ -169,7 +193,9 @@ def run(agent, node: SearchNode) -> str:
                     continue
                 logger.error(f"Code review violation: needs_revision=True but revised_code is empty/None - Max retries reached, returning original code")
                 logger.info(f"Reasoning detail: {reasoning}", extra={"verbose": True})
-                return node.code
+                if material is not None:
+                    raise RuntimeError("Material protocol review required fixes but supplied no diff")
+                return finish(node.code)
 
             if revised_code is not None and revised_code.strip():
                 logger.warning(
@@ -177,7 +203,7 @@ def run(agent, node: SearchNode) -> str:
                     "Ignoring revised_code and using original code."
                 )
             logger.info("Code approved, using original code")
-            return node.code
+            return finish(node.code)
 
         except Exception as e:
             if getattr(e, "transport_retry_exhausted", False):
@@ -186,8 +212,12 @@ def run(agent, node: SearchNode) -> str:
             if attempt < max_retries - 1:
                 logger.warning(f"{error_msg} - Will retry (attempt {attempt + 1}/{max_retries})")
                 continue
+            if material is not None:
+                raise RuntimeError(f"Material protocol review failed after {max_retries} attempts: {e}") from e
             logger.error(f"{error_msg} - Max retries reached, returning original code")
-            return node.code
+            return finish(node.code)
 
     logger.error("Code review: Unexpected exit from retry loop, returning original code")
-    return node.code
+    if material is not None:
+        raise RuntimeError("Material protocol review exited without a validated response")
+    return finish(node.code)

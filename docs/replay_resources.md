@@ -1,35 +1,51 @@
-# Local replay resources
+# Replay 资源清单
 
-Inventory checked on **2026-11-03**. [replay_resources.json](replay_resources.json) groups the existing files by dataset, corpus, source run, parent bundle, baseline and experiment. It records their current locations and hashes; it is documentation, not a configuration file read by the launcher. All paths in that JSON are relative to the user's home directory.
+[replay_resources.json](replay_resources.json) 记录本机资源的位置及关联关系，
+具体实验名称、父节点 ID 和历史结果保留在这份清单中。它是静态盘点记录，入口不会自动读取；
+使用方法见 [单步 replay](replay_improve.md) 和 [Mac MPS replay](replay_macos.md)。
 
-## Where to look
+## 清单结构
 
-| Resource | Current location under `~/` | Meaning |
-|---|---|---|
-| Public Jigsaw inputs | `nautilus/replay-inputs/{s68,jubias-f327226c}/runs/<source-run>/workspace/input/` | Two identical copies of train/test CSVs, sample submission and description |
-| Private Jigsaw labels | `nautilus/replay-inputs/s68/mlebench/jigsaw-unintended-bias-in-toxicity-classification/prepared/private/` | Grading data; the six recorded Mac replays did not configure private grading |
-| Replay paper corpus | `nautilus/replay-inputs/s68/paper_corpus/` | Shared 38,273-paper corpus, fingerprint `5cd1d5e7afd0` |
-| Downloaded source runs | `nautilus/replay-inputs/{s68,jubias-f327226c}/runs/` | Partial historical recovery artifacts for the two parents |
-| Download/selection provenance | Each download folder's `download_manifest.json`; also `jubias-f327226c/selection.json` and `candidate_inventory.jsonl` | Original manifests and random-selection record |
-| Mac baselines | `Documents/project/python/MLEvolve/mac_baselines/` | Two completed calibrated parents and one retained failed calibration |
-| Replay results | `Documents/project/python/MLEvolve/runs_mac_mps/` | Six experiments, each with completed A/B/C/D arms |
+| 字段 | 内容 |
+|---|---|
+| `datasets` | 公开训练/测试数据与可选私有评分数据的位置、文件指纹 |
+| `corpora` | 论文库位置、版本指纹和记录数 |
+| `sources` | 原 run 的恢复材料、验证 contract、下载来源 |
+| `bundles` | 一个父节点对应的 source、dataset、corpus、adapter 和 Mac baseline |
+| `baselines` | Mac 校准目录、状态、有效父节点及测量结果 |
+| `experiments` | 已记录实验的输出目录、seed 和所属 bundle |
+| `as_of` / `verification` | 盘点日期及当时的检查范围 |
 
-`s68` is the name of the first download batch, not ownership by seed 68. The corpus and data there also support seeds 67 and 69 and the second parent. Only `paper_corpus/` is needed for paper retrieval; replay additionally needs the source run, its public inputs and its completed Mac baseline. The `s68/mlebench/` tree contains the downloaded private test file, not a complete public/private dataset tree.
+`bundles` 是清单中的关联条目，不要求磁盘上存在同名文件夹。
+当前 `path_base` 为 `user_home`：路径需相对于本机用户主目录展开。
+下载 manifest 的文件映射按各自的 `files_base_path` 解释，不能假定都相对于 source run。
 
-## Parent bundles
+## 从清单填写命令参数
 
-| Logical bundle | Historical source | Completed baseline | Result family, seeds 67/68/69 |
-|---|---|---|---|
-| `jubias-36845c7c` | `20260914_071735_jubias-base-gpt56sol-s60`, parent `36845c7c…` | `jubias-parent5-s68-torch2141` | `replay_jubias-noise-parent5-mac-sNN` |
-| `jubias-f327226c` | `20260912_081234_jubias-base-gpt56sol-s57`, parent `f327226c…` | `jubias-f327226c-torch2141` | `replay_jubias-f327226c-mac-sNN` |
+先选择一个 bundle，再沿其中的引用查找资源：
 
-These bundle names are catalog entries, not newly created directories. The failed `jubias-parent5-s68` calibration remains available for diagnosis and must not be used as the replay baseline. The existing second-parent launcher remains at `~/nautilus/replay-inputs/jubias-f327226c/run_seed.sh`; it refuses to overwrite completed runs. Entry points and Mac usage are described in [replay_macos.md](replay_macos.md).
+| 参数 | 如何确定 |
+|---|---|
+| `--runs-root` | `sources` 中对应 run 目录的上一级目录 |
+| `--source-run` | bundle 的 `source_run`，也是原 run 的目录名 |
+| `--parent-node-id` | bundle 的完整 `parent_node_id` |
+| `--data-dir` | 与该 source 的 contract 一致的公开输入目录 |
+| `--corpus` | bundle 引用的 corpus 目录 |
+| `--prepared-baseline` | bundle 引用且状态为 `completed` 的 Mac baseline 目录 |
+| `--output-root` | 本次输出目录，与来源和 baseline 目录分开 |
 
-## What remains in place
+`--experiment-id` 和 `--seed` 按本次实验选择。同一配对的四个 arm 使用相同参数，
+只改变 `--arm`。无需为每次实验新建启动脚本。
 
-- All original directories, manifests, launchers, baselines and results retain their paths. Baseline identity includes resolved source paths, while experiment identity includes corpus paths and the baseline manifest hash. Renaming folders or rewriting old manifests would require a separate migration.
-- The two public-input copies contain the same 847,325,974 bytes, but each source has a different validation contract (source seed 60 versus 57). Keep those contracts separate. No deduplication or physical disk-space estimate was performed.
-- Downloaded source runs omit original checkpoint weights; their recovery artifacts support Mac recalibration, not arbitrary restoration of the original GPU checkpoint.
-- `~/Documents/project/python/Agentic_Knowledge_Base/output/paper_corpus/` currently has **12,800 papers**, fingerprint `35d01b8b78ae`. It is a different corpus and must not silently replace the replay corpus.
+## 输入与输出边界
 
-Inventory verification checked all **210 files** listed by the two download manifests against size and SHA256, the two public-input copies, parent/baseline/corpus identities for all six experiments, and completion status for all 24 arms. The old manifests use different file-map bases; those bases are explicit in the JSON. This check did not rerun training, scoring or a full checkpoint audit. Update this static catalog when adding resources; preserve the original experiment manifests as the historical record.
+- source run、公开数据、验证 contract、corpus 和已完成的 baseline 作为固定输入。
+  即使公开 CSV 相同，不同来源的验证 contract 也不能合并；不同版本的 corpus 不能互换。
+- 下载包可能只包含恢复所需的部分材料。根据 `contents` 和 `checkpoint_weights_included`
+  判断内容；论文库本身不足以恢复 replay，也不能把缺少权重的下载包用于原 checkpoint 续训。
+- Mac 目前仅支持已登记源码的 adapter，并要求 candidate runtime；清单有一个父节点条目
+  不代表任意模型都能在 MPS 上运行。每个父节点须有对应的完成校准，失败项只供诊断。
+- 历史 manifest 中包含路径和内容身份。移动输入或改写 baseline 需要同步处理其引用，
+  清理实验输出时不要把仍需复用的输入一起删除。
+- 新增、迁移或删除资源后更新清单；`as_of` 之后的状态以实际文件为准，历史实验 manifest
+  仍保留各次运行的原始记录。

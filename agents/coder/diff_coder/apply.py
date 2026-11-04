@@ -20,6 +20,7 @@ def apply_diff_with_retry(
     original_code: str,
     max_retries: int = 3,
     regenerate_fn=None,
+    require_complete: bool = False,
 ) -> Tuple[Optional[str], int, str]:
     current_code = original_code
     total_applied = 0
@@ -52,11 +53,20 @@ def apply_diff_with_retry(
                     current_code = updated_code
                     total_applied += count
 
-                if total_applied > 0 and current_code != original_code and not has_incomplete_block:
+                if (total_applied > 0 and current_code != original_code and not has_incomplete_block
+                        and (not require_complete or count == search_markers == replace_markers)):
                     logger.info(f"Successfully applied {total_applied} diff patch(es)")
                     return current_code, total_applied, ""
                 else:
-                    if has_incomplete_block and (count > 0 or total_applied > 0):
+                    if require_complete and (count != search_markers or search_markers != replace_markers):
+                        retry_note = (
+                            f"Your last diff applied {count} of {search_markers} requested blocks; "
+                            "some blocks did not match or were incomplete. "
+                            f"I have already applied {total_applied} patch(es). "
+                            "Provide ONLY the remaining patches, matching the CURRENT code exactly; "
+                            "do not repeat patches already applied."
+                        )
+                    elif has_incomplete_block and (count > 0 or total_applied > 0):
                         retry_note = (
                             "Your previous diff output appears truncated/incomplete "
                             "(missing closing '>>>>>>> REPLACE'). "

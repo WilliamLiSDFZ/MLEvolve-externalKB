@@ -1,31 +1,38 @@
 # 单步 improve 四组实验
 
-入口为仓库根目录的 `replay_improve.py`。每个 Job 调用一次，只执行一个 arm 的
+入口为仓库根目录的 `replay_improve.py`。每次调用只执行一个 arm 的
 **恢复父节点 → 准备注入 → improve → code review → 执行训练代码 → 解析和验证结果**。
 不会启动新的 MLEvolve 搜索，也不会自动选择下一节点或再做 debug。
 
+从仓库根目录执行，先把占位符替换为本次实验的路径和标识：
+
 ```bash
 python replay_improve.py \
-  --runs-root /workspace/MLEvolve/runs \
-  --source-run ORIGINAL_RUN_NAME \
-  --parent-node-id FULL_PARENT_NODE_ID \
-  --experiment-id noise_pair_001 \
+  --runs-root /absolute/path/to/source-runs \
+  --source-run '<source-run-name>' \
+  --parent-node-id '<full-parent-node-id>' \
+  --experiment-id '<experiment-id>' \
   --arm A \
-  --corpus /workspace/Agentic_Knowledge_Base/output/paper_corpus
+  --corpus /absolute/path/to/paper_corpus
 ```
 
-另三个 Job 使用相同参数，只把 `--arm` 改成 `B`、`C`、`D`。所有四组都要传相同
+另三个 arm 使用相同参数，只把 `--arm` 改成 `B`、`C`、`D`。所有四组都要传相同
 `--corpus`，即使 A/B 不读论文。默认 `--runs-root` 是当前仓库的 `runs/`。
-已提供 [三个 seed、每个四个 arm 的 Job 配置](../k8s/replay-abcd.md)。
+集群部署可参考 [Kubernetes 配置示例](../k8s/replay-abcd.md)。Mac 的准备、校准和
+终端批量命令见 [Mac MPS replay](replay_macos.md)，无需为每个实验创建启动脚本。
 
 父节点必须是 `logs/journal.json` 中已有、成功且有效的非 root 节点，传完整 `id`，
 不接受 step 或 ID 前缀。它可以是 draft、debug 或 improve 等阶段产生的成功节点；
 本次操作固定为 improve。不是读取 `best_solution.py` 或最终 solution。
 
-配置继承原 run 的 `logs/config.yaml`。当前 Job 的 `LLM_API_KEY` 始终替换历史凭据；
+配置继承原 run 的 `logs/config.yaml`。当前环境的 `LLM_API_KEY` 始终替换历史凭据；
 如设置 `LLM_MODEL`、`LLM_BASE_URL`、`LLM_REASONING_EFFORT`，它们也会覆盖原配置，
-四个 Job 必须相同。`--seed` 可选，默认原 run 的 seed，用于随机材料和进程内随机数；
+四个 arm 必须相同。`--seed` 可选，默认原 run 的 seed，用于随机材料和进程内随机数；
 它不保证远端 LLM 确定性。验证划分仍使用原 run 的 seed 和 contract。
+
+原配置中的 `agent.use_diff_mode` 决定代码生成方式。开启时，planner 先制定计划，
+coder 再输出 SEARCH/REPLACE 补丁修改父源码；关闭时生成完整的新源码。
+diff 是常规 MLEvolve 已有的生成方式，默认配置开启。材料协议 v2 目前只支持 diff 路径。
 
 ## 四组材料
 
@@ -36,7 +43,7 @@ python replay_improve.py \
 | C | 随机论文，经 LLM 判定与当前任务无关后，从全文提取建议 | 恰好 12,000 字符 |
 | D | 现有 analogy agent 的节点诊断、检索和建议报告 | 不超过 12,000 字符 |
 
-这里沿用旧 analogy 实验的 `report_char_budget=12000`，**单位是 Python 字符数，
+材料预算为 `report_char_budget=12000`，**单位是 Python 字符数，
 不是 token**；统计注入正文，不包括共用的提示语。
 
 B 从 Austen / Chesterton 小说白名单中选取。NLTK 数据缺失时，下载 Gutenberg
@@ -52,9 +59,57 @@ C 从论文 corpus 随机不放回抽样，最多尝试 20 篇；先取得 PDF �
 D 调用原 `retrieve_for_node`，继承原配置的检索设置并启用全文读取。空报告或超预算
 会将本次标记为失败，不静默变成 A。D 的结构化报告和检索轨迹照常存档。
 
-B/C/D 通过相同的 `Supplementary material` 区块送入原 improve 的 diff/full-rewrite
+默认模式下，B/C/D 通过相同的 `Supplementary material` 区块送入原 improve 的 diff/full-rewrite
 流程。为保持四组生成流程可比，这个实验入口不启用 D 专属的结构化选择/handoff
 附加提示；D 复用的是原 analogy 的报告生成过程。普通 `run.py` 的 analogy 行为不变。
+Mac 路径可显式启用下述材料协议 v2，四个 arm 必须使用相同协议。
+
+## 可选材料协议 v2（Mac diff replay）
+
+在四个 arm 的命令中都加入 `--profile mac-mps --material-protocol v2`。
+该协议要求原配置启用 diff mode；未指定时保持默认流程，集群入口不启用 v2。
+该协议只改变建议传递和记录，材料生成、原父节点、memory、模型配置、训练预算和评分规则不变。
+已有环境和适配源码不变时，可直接复用已完成的 Mac baseline。
+
+- A 的正文为空，B/C 仍恰好 12,000 字符，D 仍为不超过 12,000 字符的原报告。
+  缺失 B/C/D 正文会失败，不作为 A 继续；C 的截断前输出、D 的隐藏结构化字段及
+  已丢弃机制都不额外提供给 planner/coder。
+- 初始 planner、refine/direct planner、coder（包括重试）和 review 都收到同一份完整正文，
+  使用四组相同的区块和输出约束。初始计划保留为自然语言，refine 可根据证据修正方向。
+- 最终计划必须包含 `material_decision`：`decision` 为 `adopt` / `reject` / `no_material`，
+  同时填写 `source_quotes`、`reason`、`adaptation`、`target_locations`。
+  采用需要可核对的原文引用、具体改法和目标位置；拒绝必须解释理由；仅空正文允许 `no_material`。
+  决定被冻结后交给 coder，不要求 D 必须采用，也不把声明采用视为已实现。
+- 任务、评估指标、验证划分、训练 seed 和执行预算固定。模型、采样、训练损失和优化方法
+  可以有理据地改变。coder 无法落实计划时输出 `MATERIAL_CONFLICT: 原因`，该 arm 明确失败。
+- review 在原有调用中返回 `material_review`，记录 `consistent` / `inconsistent` / `uncertain`、
+  理由及源码原文证据，绑定 review 输入源码哈希。若 reviewer 修补了代码，最终源码的一致性
+  记为 `uncertain`，保留输入代码的判断；不为确认采用额外调用 LLM，也不为 D 强制修补。
+- 结构化计划、diff、review 各自沿用最多三次的上限；初始自然语言规划一次。
+  不合格材料决定可在现有规划上限内重试。LLM 传输层的终止错误（包括其拒绝的不合法 JSON/schema）
+  立即结束，不叠加外层重试；已取得的非法输出也保存。各组遵循相同规则，实际调用次数可因失败不同。
+  diff 不完整、没有代码变化或 review 无法完成时均失败，不回退成完整重写或直接训练父代码。
+
+每个 arm 的 `logs/material_handoff/` 保存 `audit.json`、完整 `material.txt`、逐次调用的
+`calls/*.json`（传给 LLM 包装器的完整 prompt/schema、返回值或错误）、`parent.py`、
+`generated.py`、`reviewed.py` 及相对 parent 的 diff。初始自然语言计划保存在对应调用的 response。
+`result.json` 摘录协议、决定、最终代码一致性判断和 audit 路径；每组材料哈希只进入本组记录，
+不会放入四组共用的 `experiment.json`。共同 identity 会记录 `material_protocol=v2`。
+`generated_node.json.prompt_input` 是 improve 构建的汇总提示；审查实际投喂内容时以 `calls/` 为准。
+
+切换协议时，为整组分配新的 experiment ID，四个 arm 全部使用同一协议运行。
+协议标识可写入 ID 便于区分；不同协议的结果不组成一组配对实验。
+清理实验输出时，下载来源、corpus、公开数据和已完成的共同 baseline 仍是重新运行的输入。
+
+离线验证：
+
+```bash
+.venv/bin/python -m unittest \
+  tests.verify_replay_material \
+  tests.verify_replay_material_planners \
+  tests.verify_replay_material_coder_review \
+  tests.verify_replay_material_transport
+```
 
 ## 恢复边界与运行条件
 
@@ -82,10 +137,10 @@ LLM 重写任务或重新判断指标方向。
 `exec.timeout`、runtime candidate budget 和恢复的剩余预算约束。Job 的外部时限应另外
 预留准备数据、LLM、训练和评分所需时间。
 
-每个 arm 只有一个执行槽，继承 Job 的 CUDA 可见设备；GPU/CPU 配额和挂载权限由 Job
+默认集群路径中，每个 arm 只有一个执行槽，继承 Job 的 CUDA 可见设备；GPU/CPU 配额和挂载权限由 Job
 负责，脚本不会调度 GPU，也不是执行任意生成代码的安全沙箱。四组应申请相同资源。
 
-旧流程需要格式校验服务时，入口会启动自己的本地服务并在结束时关闭。训练后复用
+原配置需要格式校验服务时，入口会启动自己的本地服务并在结束时关闭。训练后复用
 原本的 validation metric；若配置了 MLE-bench `dataset_dir`，还会尝试对新 child 的
 submission 做离线私有评分。私有答案不送入 LLM，评分不可用/失败会单独记录。
 
@@ -102,7 +157,7 @@ runs/replay_<experiment_id>/
     logs/
       config.yaml
       restored_journal.json
-      generated_node.json      # review 前的代码、计划与生成提示
+      generated_node.json      # review 前的代码、计划与汇总提示
       child_solution.py        # review 后本次代码
       journal.json             # 恢复前缀 + 新 child
       executions/              # 原始训练输出

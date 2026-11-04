@@ -39,6 +39,7 @@ def diff_generate_and_apply(
     analogy_mechanism_brief: str = "",
 ) -> Tuple[str, str]:
     model_name = agent_instance.acfg.code.model
+    material = getattr(agent_instance, "replay_material", None)
 
     plan_text = _format_plan_text(planning_result)
 
@@ -56,6 +57,8 @@ def diff_generate_and_apply(
     if extra_user_sections:
         user_prompt_parts.append(f"\n{extra_user_sections}\n")
     user_prompt_parts.append(f"\n{diff_instructions}\n")
+    if material is not None:
+        user_prompt_parts.append(material.section("coder"))
     user_prompt = "".join(user_prompt_parts)
 
     assistant_text = _build_assistant_text(
@@ -64,12 +67,24 @@ def diff_generate_and_apply(
 
     diff_prompt = _build_diff_model_prompt(model_name, introduction, user_prompt, assistant_text)
 
+    conflict = None
+
+    def generate_diff(prompt):
+        nonlocal conflict
+        # The shared patch retry loop catches exceptions; retain explicit conflicts until it exits.
+        if conflict is not None:
+            return conflict
+        kwargs = dict(prompt=prompt, temperature=agent_instance.acfg.code.temp, cfg=agent_instance.cfg)
+        response = (material.call("coder", generate, **kwargs) if material is not None
+                    else generate(**kwargs))
+        if material is not None and isinstance(response, str) and response.lstrip().startswith("MATERIAL_CONFLICT:"):
+            conflict = response.strip()
+        return response
+
     logger.info("Calling LLM to generate diff...")
-    diff_response = generate(
-        prompt=diff_prompt,
-        temperature=agent_instance.acfg.code.temp,
-        cfg=agent_instance.cfg,
-    )
+    diff_response = generate_diff(diff_prompt)
+    if conflict is not None:
+        raise RuntimeError(conflict)
 
     def regenerate_fn(current_code: str, retry_note: str) -> str:
         new_assistant = _build_assistant_text(
@@ -83,19 +98,23 @@ def diff_generate_and_apply(
                 new_prompt["user"] = retry_note + "\n\n" + new_prompt["user"]
             elif isinstance(new_prompt, str):
                 new_prompt = retry_note + "\n\n" + new_prompt
-        return generate(
-            prompt=new_prompt,
-            temperature=agent_instance.acfg.code.temp,
-            cfg=agent_instance.cfg,
-        )
+        return generate_diff(new_prompt)
 
-    final_code, total_applied, _ = apply_diff_with_retry(
+    final_code, total_applied, retry_note = apply_diff_with_retry(
         diff_response, parent_code,
         max_retries=max_diff_retries,
         regenerate_fn=regenerate_fn,
+        **({"require_complete": True} if material is not None else {}),
     )
 
     plan_str = format_planning_result_for_plan(planning_result)
+
+    if material is not None:
+        if conflict is not None:
+            raise RuntimeError(conflict)
+        if not final_code or not total_applied or final_code == parent_code or retry_note:
+            raise RuntimeError(f"Material protocol coder did not complete its diff: {retry_note or 'no code change'}")
+        material.record_code("generated", final_code)
 
     if final_code:
         logger.info(f"Diff completed: applied {total_applied} patch(es)")
