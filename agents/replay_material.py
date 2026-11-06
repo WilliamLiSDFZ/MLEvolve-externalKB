@@ -141,8 +141,9 @@ class MaterialProtocol:
         choice = decision["decision"]
         if choice not in ("adopt", "reject", "no_material") or (choice == "no_material") != (self.text == ""):
             raise ValueError("Material decision does not match the provided material")
-        if any(quote not in self.text for quote in decision["source_quotes"]):
-            raise ValueError("Material source_quotes must be exact excerpts of the frozen material")
+        material_text = " ".join(self.text.split())
+        if any(" ".join(quote.split()) not in material_text for quote in decision["source_quotes"]):
+            raise ValueError("Material source_quotes must match the frozen material (ignoring whitespace only)")
         if choice == "adopt" and (not decision["source_quotes"] or not _nonempty(decision["adaptation"])
                                   or not decision["target_locations"]):
             raise ValueError("Adoption requires source quotes, an adaptation and target locations")
@@ -156,6 +157,29 @@ class MaterialProtocol:
         self.decision = copy.deepcopy(plan["material_decision"])
         self.audit.update(plan=copy.deepcopy(plan), material_decision=copy.deepcopy(self.decision))
         self._save()
+
+    def _normalize_plan_response(self, stage, exc, schema):
+        from llm.responses import ResponsesError
+
+        if (stage not in ("planner_direct", "planner_refine") or
+                not isinstance(exc, ResponsesError) or exc.category != "invalid_output" or schema is None):
+            return None
+        import jsonschema
+
+        try:
+            plan = json.loads(getattr(exc, "raw_output", ""))
+            if not isinstance(plan, dict) or "material_decision" in plan:
+                return None
+            modules = plan.get("plan")
+            if not isinstance(modules, dict) or not isinstance(modules.get("material_decision"), dict):
+                return None
+            # Move an existing decision only; never invent or choose between decisions.
+            plan["material_decision"] = modules.pop("material_decision")
+            jsonschema.validate(plan, schema)
+            self.validate_plan(dict(plan, parse_success=True))
+        except (ValueError, TypeError, jsonschema.ValidationError):
+            return None
+        return json.dumps(plan, ensure_ascii=False)
 
     def call(self, stage, function, **kwargs):
         index = len(self.audit["calls"]) + 1
@@ -176,7 +200,13 @@ class MaterialProtocol:
                 record["response"] = exc.raw_output
             if hasattr(exc, "category"):
                 record["error_category"] = exc.category
+            normalized = self._normalize_plan_response(stage, exc, record["schema"])
+            if normalized is not None:
+                record.update(status="completed", normalized_response=normalized,
+                              normalization="moved plan.material_decision to material_decision")
             atomic_json(self.directory / relative, record)
+            if normalized is not None:
+                return normalized
             raise
         record.update(status="completed", response=response)
         atomic_json(self.directory / relative, record)

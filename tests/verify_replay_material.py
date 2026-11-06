@@ -109,6 +109,25 @@ class MaterialBoundaryTests(unittest.TestCase):
         for arm in "BCD":
             self.material(arm).validate_plan(plan_for(arm))
 
+    def test_quote_matching_ignores_only_whitespace_without_changing_evidence(self):
+        for arm in "BCD":
+            text = material_text(arm).replace("balancing training", "balancing\ntraining")
+            protocol = self.material(arm, text)
+            for choice in ("adopt", "reject"):
+                with self.subTest(arm=arm, choice=choice):
+                    plan = plan_for(arm, choice)
+                    plan["material_decision"]["source_quotes"] = ["consider\t balancing training groups."]
+                    original = copy.deepcopy(plan)
+                    protocol.validate_plan(plan)
+                    self.assertEqual(plan, original)
+                    self.assertEqual(protocol.text, text)
+                    self.assertEqual((protocol.directory / "material.txt").read_text(), text)
+            for quote in ("consider training groups.", "consider balancing training groups!",
+                          "consider balancing training subgroups."):
+                with self.subTest(arm=arm, quote=quote), self.assertRaisesRegex(ValueError, "source_quotes"):
+                    plan["material_decision"]["source_quotes"] = [quote]
+                    protocol.validate_plan(plan)
+
     def test_empty_control_only_allows_no_material(self):
         protocol = self.material("A")
         protocol.validate_plan(plan_for("A"))

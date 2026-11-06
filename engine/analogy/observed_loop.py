@@ -455,6 +455,12 @@ def run(packet_md, corpus, llm_cfg, *, max_turns, top_k, max_mechanisms,
             break
     else:
         res.reason = f"no report within {max_turns} turns"
+        if res.submission_attempts:
+            issues = res.submission_attempts[-1].get("issues", [])
+            summary = "; ".join(f"{issue['code']} at {issue['location']}" for issue in issues[:3])
+            res.reason = (f"no accepted report within {max_turns} turns; "
+                          f"{len(res.submission_attempts)} rejected submission(s); "
+                          f"last rejection: {summary or 'see submission_attempts'}")
     if res.delivery_status == "failed" and not res.failure_kind:
         res.failure_kind = "validation" if res.submission_attempts else "turn_budget"
     res.seconds = time.monotonic() - started

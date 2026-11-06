@@ -140,6 +140,41 @@ class ContextTests(unittest.TestCase):
         self.assertFalse(session.validate_anchor({"node_id": current.id, "source_sha256": first["source_sha256"], "start_line": 1, "end_line": 1}))
         second = session.dispatch("read_candidate_code", first["continuation"])
         self.assertIn("column", second["content"])
+        while second["continuation"]:
+            second = session.dispatch("read_candidate_code", second["continuation"])
+        anchor = {"node_id": current.id, "source_sha256": first["source_sha256"], "start_line": 1, "end_line": 1}
+        self.assertTrue(session.validate_anchor(anchor))
+        session.dispatch("read_candidate_code", {"start_line": 1, "start_column": 29000})
+        self.assertEqual(sum(a["evidence_kind"] == "source_read" for a in session.anchors), 1)
+
+    def test_read_fragments_require_gap_free_coverage_of_the_same_source(self):
+        first_node = node("first", code="X = '" + "a" * 600 + "'\n")
+        other_node = node("other", code=first_node.code)
+        session = CodeReadingSession([first_node, other_node], first_node.id)
+        first = session.dispatch("read_candidate_code", {"node_id": first_node.id}, max_chars=2200)
+        column = first["continuation"]["start_column"]
+        anchor = {"node_id": first_node.id, "source_sha256": first["source_sha256"], "start_line": 1, "end_line": 1}
+        session.dispatch("read_candidate_code", {"node_id": other_node.id, "start_line": 1, "start_column": column})
+        self.assertFalse(session.validate_anchor(anchor))
+        self.assertFalse(session.validate_anchor({**anchor, "node_id": other_node.id}))
+        session.dispatch("read_candidate_code", {"node_id": first_node.id, "start_line": 1, "start_column": column + 1})
+        self.assertFalse(session.validate_anchor(anchor))
+        session.dispatch("read_candidate_code", {"node_id": first_node.id, "start_line": 1, "start_column": column - 1})
+        self.assertTrue(session.validate_anchor(anchor))
+        self.assertFalse(session.validate_anchor({**anchor, "node_id": other_node.id}))
+        self.assertFalse(session.validate_anchor({**anchor, "source_sha256": "different-source"}))
+
+    def test_discarded_oversized_read_does_not_register_fragment_coverage(self):
+        current = node("long-id-" + "x" * 2100, code="X = '" + "a" * 600 + "'\n")
+        session = CodeReadingSession([current], current.id)
+        dropped = session.dispatch("read_candidate_code", {}, max_chars=2200)
+        self.assertEqual(dropped["status"], "error")
+        self.assertIn("response_metadata_exceeds_budget", dropped["reason"])
+        tail = session.dispatch("read_candidate_code", {"start_line": 1, "start_column": 100})
+        anchor = {"node_id": current.id, "source_sha256": tail["source_sha256"], "start_line": 1, "end_line": 1}
+        self.assertFalse(session.validate_anchor(anchor))
+        session.dispatch("read_candidate_code", {})
+        self.assertTrue(session.validate_anchor(anchor))
 
     def test_diff_actual_change_and_budgets(self):
         parent = node("parent", code="def loss(x):\n    return x\n")

@@ -135,6 +135,9 @@ class SubmissionLoopTests(unittest.TestCase):
         self.assertEqual(failed.failure_kind, "validation")
         self.assertFalse(failed.report_md)
         self.assertIsNone(failed.report)
+        self.assertIn("1 rejected submission(s)", failed.reason)
+        issue = failed.submission_attempts[-1]["issues"][0]
+        self.assertIn(f"{issue['code']} at {issue['location']}", failed.reason)
         declined = self.execute([fixtures.response(fixtures.tool("submit_report", abstention(), "decline"))],
                                 max_turns=1)
         self.assertEqual(declined.delivery_status, "abstained", declined.reason)
@@ -142,6 +145,12 @@ class SubmissionLoopTests(unittest.TestCase):
         self.assertFalse(declined.report_md)
         self.assertEqual(declined.reason, abstention()["abstention_reason"])
         self.assertEqual(declined.submission_attempts[0]["status"], "abstained")
+
+    def test_turn_limit_without_submission_keeps_distinct_reason(self):
+        result = self.execute(self.evidence_turns(), max_turns=2)
+        self.assertEqual(result.failure_kind, "turn_budget")
+        self.assertEqual(result.submission_attempts, [])
+        self.assertEqual(result.reason, "no report within 2 turns")
 
     def test_transport_failure_before_any_submission_is_not_abstention(self):
         def broken_transport():

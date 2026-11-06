@@ -130,6 +130,7 @@ class CodeReadingSession:
         self.sources = {}
         self.ledger = []
         self.anchors = []
+        self._read_spans = {}
         self.calls_used = 0
         self.chars_used = 0
         self._budget_stopped = False
@@ -318,7 +319,7 @@ class CodeReadingSession:
         if column > len(record["lines"][start - 1]):
             raise ValueError("start_column exceeds line length")
         last = min(end, start + min(max_lines, self.options.max_read_lines) - 1)
-        content, used, continuation, complete = [], 0, None, []
+        content, used, continuation, spans = [], 0, None, []
         for line_no in range(start, last + 1):
             line = record["lines"][line_no - 1]
             offset = column if line_no == start else 0
@@ -330,18 +331,34 @@ class CodeReadingSession:
             segment = line[offset:offset + room]
             content.append(prefix + segment)
             used += len(prefix) + len(segment) + 1
-            if offset == 0 and len(segment) == len(line):
-                complete.append(line_no)
+            spans.append((line_no, offset, offset + len(segment)))
             if offset + len(segment) < len(line):
                 continuation = {"node_id": record["node_id"], "start_line": line_no, "start_column": offset + len(segment), "end_line": end, "symbol": None}
                 break
         if continuation is None and last < end:
             continuation = {"node_id": record["node_id"], "start_line": last + 1, "start_column": 0, "end_line": end, "symbol": None}
-        anchors = [{"node_id": record["node_id"], "source_sha256": record["source_sha256"],
-                    "start_line": n, "end_line": n, "evidence_kind": "source_read"} for n in complete]
         return {**self._metadata(record), "content": "\n".join(content), "start_line": start,
                 "end_line": (start + len(content) - 1), "truncated": continuation is not None,
-                "continuation": continuation}, anchors
+                "continuation": continuation}, spans
+
+    def _record_read_spans(self, record, spans):
+        # Continuations can complete a line across responses; gaps still mean unread source.
+        for line, start, end in spans:
+            key = (record["node_id"], record["source_sha256"], line)
+            full = (0, len(record["lines"][line - 1]))
+            previous = self._read_spans.get(key, [])
+            if previous == [full]:
+                continue
+            ranges = sorted(set([*previous, (start, end)]))
+            covered = 0
+            for left, right in ranges:
+                if left > covered:
+                    break
+                covered = max(covered, right)
+            self._read_spans[key] = [full] if covered == full[1] else ranges
+            if covered == full[1]:
+                self.anchors.append({"node_id": key[0], "source_sha256": key[1],
+                                     "start_line": line, "end_line": line, "evidence_kind": "source_read"})
 
     def _diff(self, args, char_limit):
         target = self._lookup(args.get("target_node_id"))
@@ -420,7 +437,7 @@ class CodeReadingSession:
         cap = min(remaining, self.options.max_diff_chars if name == "diff_candidate_code" else self.options.max_read_chars)
         if max_chars is not None:
             cap = min(cap, max(1, int(max_chars)))
-        anchors = []
+        anchors, read_spans = [], []
         try:
             if cap < 1500:
                 self._budget_stopped = True
@@ -436,7 +453,7 @@ class CodeReadingSession:
                           "allowed_nodes": self.allowed_nodes(), "truncated": False}
             elif name == "read_candidate_code":
                 record = self._lookup(args.get("node_id"))
-                result, anchors = self._read(record, args, max(1, (cap - 1800) // 2))
+                result, read_spans = self._read(record, args, max(1, (cap - 1800) // 2))
             else:
                 result, anchors = self._diff(args, max(1, (cap - 7000) // 2))
             result.setdefault("status", "ok")
@@ -471,6 +488,8 @@ class CodeReadingSession:
             anchors = []
         self.chars_used += self._size(result)
         self.anchors.extend(anchors)
+        if name == "read_candidate_code" and result.get("status") == "ok":
+            self._record_read_spans(record, read_spans)
         if name == "candidate_code_index" and result.get("status") == "ok":
             self._record_index_anchors(record, result["index"])
         self.ledger.append({"tool": name, "arguments": args, "response": copy.deepcopy(result)})
